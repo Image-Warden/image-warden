@@ -1,0 +1,11 @@
+# ~/.config/systemd/user/iw-release.timer
+[Unit]
+Description=image-warden: release timer (every 6h)
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

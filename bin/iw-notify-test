@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# iw-notify-test: Send a test notification through all configured backends
+#
+# Usage:
+#   iw-notify-test
+
+set -euo pipefail
+
+_IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/image-warden"
+
+CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+SECRETS="${_IW_CONFIG_HOME}/secrets"
+NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
+
+if [[ ! -f "$CONF" ]]; then
+    echo "ERROR: config not found: $CONF" >&2; exit 1
+fi
+# shellcheck source=/dev/null
+source "$CONF"
+
+if [[ ! -f "$SECRETS" ]]; then
+    echo "ERROR: secrets not found: $SECRETS" >&2; exit 1
+fi
+# shellcheck source=/dev/null
+source "$SECRETS"
+
+if [[ ! -f "$NOTIFY_LIB" ]]; then
+    echo "ERROR: notify lib not found: $NOTIFY_LIB" >&2
+    echo "  Run install.sh first." >&2; exit 1
+fi
+# shellcheck source=/dev/null
+source "$NOTIFY_LIB"
+
+# --- Verify required vars are set --------------------------------------------
+ok=1
+if [[ ${#NOTIFY_BACKENDS[@]} -eq 0 || ( ${#NOTIFY_BACKENDS[@]} -eq 1 && -z "${NOTIFY_BACKENDS[0]:-}" ) ]]; then
+    echo "ERROR: NOTIFY_BACKENDS is empty. No backends configured in ${CONF}?" >&2
+    exit 1
+fi
+
+for backend in "${NOTIFY_BACKENDS[@]}"; do
+    case "$backend" in
+        discord)
+            [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && \
+                { echo "ERROR: discord: DISCORD_WEBHOOK_URL not set in $SECRETS" >&2; ok=0; } ;;
+        slack)
+            [[ -z "${SLACK_WEBHOOK_URL:-}" ]] && \
+                { echo "ERROR: slack: SLACK_WEBHOOK_URL not set in $SECRETS" >&2; ok=0; } ;;
+        teams)
+            [[ -z "${TEAMS_WEBHOOK_URL:-}" ]] && \
+                { echo "ERROR: teams: TEAMS_WEBHOOK_URL not set in $SECRETS" >&2; ok=0; } ;;
+        telegram)
+            [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] && \
+                { echo "ERROR: telegram: TELEGRAM_BOT_TOKEN not set in $SECRETS" >&2; ok=0; }
+            [[ -z "${TELEGRAM_CHAT_ID:-}" ]] && \
+                { echo "ERROR: telegram: TELEGRAM_CHAT_ID not set in $SECRETS" >&2; ok=0; } ;;
+        ntfy)
+            [[ -z "${NTFY_URL:-}" ]] && \
+                { echo "ERROR: ntfy: NTFY_URL not set in $SECRETS" >&2; ok=0; } ;;
+        *)
+            echo "WARNING: unknown backend '${backend}'." >&2 ;;
+    esac
+done
+[[ $ok -eq 0 ]] && exit 1
+
+# --- Send --------------------------------------------------------------------
+echo "Backends: ${NOTIFY_BACKENDS[*]}"
+echo "Sending test notification..."
+
+export IW_NOTIFY_DEBUG=1
+notify_staged \
+    "test-image" \
+    "registry.tld/library/image:tag" \
+    "stable_$(date -u '+%Y%m%d-%H%M')" \
+    "sha256:abc123def456789test..." \
+    "${QUARANTINE_HOURS:-72}"
+
+echo "Done."

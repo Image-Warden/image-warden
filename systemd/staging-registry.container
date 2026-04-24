@@ -1,0 +1,34 @@
+# ~/.config/containers/systemd/staging-registry.container
+# local OCI distribution registry for image-warden
+#
+# Adjust Volume paths to match your setup.
+# The registry config.yml must enable deletion (required for iw-cleanup).
+
+[Unit]
+Description=image-warden staging registry
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName=staging-registry
+Image=docker.io/library/registry:3
+AutoUpdate=disabled
+PublishPort=5000:5000
+
+# TODO: set volume paths
+# Volume=/path/to/registry/data:/var/lib/registry:Z
+# Volume=/path/to/registry/config.yml:/etc/distribution/config.yml:Z,ro
+
+HealthCmd=/bin/sh -c "wget -q -O /dev/null --server-response http://127.0.0.1:5000/v2/ 2>&1 | grep -qE 'HTTP/[0-9.]+ (200|401)'"
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=20s
+DropCapability=ALL
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

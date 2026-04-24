@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# iw-cleanup: Enforce image retention policy and run registry garbage collection
+#
+# Pipeline step 3 (run on a schedule or manually):
+#   1. Prune oldest timestamp-tagged versions per image, keeping KEEP_IMAGES
+#      (default: 5). The :production tag is never deleted.
+#   2. Run registry garbage collection to remove unreferenced layers.
+#      Requires deletion enabled in registry config
+#      (storage.delete.enabled: true) and the registry container running.
+#   3. Remove Trivy scan reports older than 30 days from cache.
+#
+# Usage:
+#   iw-cleanup
+#
+# Options:
+#   -h, --help   Show this help.
+
+set -euo pipefail
+
+# -- Paths --------------------------------------------------------------------
+_IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
+_IW_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/image-warden"
+
+CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+
+usage() {
+    awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
+    exit 0
+}
+
+[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage
+
+# -- Bootstrap ----------------------------------------------------------------
+if [[ ! -f "$CONF" ]]; then
+    echo "ERROR: config not found: $CONF" >&2
+    echo "  Copy config/image-warden.conf.example to $CONF and edit it." >&2
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONF"
+
+STATE_DIR="${_IW_STATE_HOME}"
+TRIVY_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
+mkdir -p "$STATE_DIR"
+
+# -- Helpers -------------------------------------------------------------------
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+_local_tls_flag() {
+    [[ "${LOCAL_REGISTRY_TLS_VERIFY:-false}" == "false" ]] \
+        && echo "--tls-verify=false" || echo "--tls-verify=true"
+}
+
+# Get http/https scheme for registry API calls.
+_registry_scheme() {
+    [[ "${LOCAL_REGISTRY_TLS_VERIFY:-false}" == "false" ]] && echo "http" || echo "https"
+}
+
+# Get the tag portion from a full image reference, defaulting to "latest" if no tag or digest is present.
+_upstream_tag() {
+    local ref="$1" part
+    part="${ref##*:}"
+    if [[ "$part" == "$ref" || "$part" == */* ]]; then
+        echo "latest"
+    else
+        echo "$part"
+    fi
+}
+
+# -- enforce retention policy -------------------------------------------------
+# List all timestamp-tagged versions for each image, sort oldest-first, and
+# delete any beyond KEEP_IMAGES. Defaults to "5" if KEEP_IMAGES not set.
+# Do not touch :production
+if [[ ${#IMAGES[@]} -eq 0 ]]; then
+    log "No images configured. Add entries to IMAGES in $CONF."
+else
+    _keep="${KEEP_IMAGES:-5}"
+    if ! [[ "$_keep" =~ ^[0-9]+$ ]] || [[ "$_keep" -le 0 ]]; then
+        log "ERROR: KEEP_IMAGES must be a positive integer (got '$_keep')."
+        exit 1
+    fi
+    cleaned=0
+    scheme=$(_registry_scheme)
+
+    for entry in "${IMAGES[@]}"; do
+        IFS='|' read -r upstream local_name _severity <<< "$entry"
+
+        upstream_tag=$(_upstream_tag "$upstream")
+
+        # Fetch the full tag list via skopeo
+        tags_json=$(skopeo list-tags \
+            "$(_local_tls_flag)" \
+            "docker://${LOCAL_REGISTRY}/${local_name}" \
+            2>/dev/null) || {
+            log "${local_name}: WARNING: could not list tags - skipping"
+            continue
+        }
+
+        # Filter to timestamp-tagged versions matching <upstream-tag>_YYYYMMDD-HHMM, sort oldest-first
+        mapfile -t ts_tags < <(
+            printf '%s' "$tags_json" \
+            | jq -r --arg prefix "${upstream_tag}_" \
+                '[.tags[]? | select(test("^" + $prefix + "[0-9]{8}-[0-9]{4}$"))] | sort[]'
+        )
+
+        total=${#ts_tags[@]}
+        to_delete=$(( total - _keep ))
+
+        if [[ $to_delete -le 0 ]]; then
+            log "${local_name}: ${total} version(s). within retention limit (keep ${_keep})"
+            continue
+        fi
+
+        log "${local_name}: ${total} version(s). pruning ${to_delete} oldest (keep ${_keep})"
+
+        # Fetch :production digest once; used below to avoid deleting it
+        prod_digest=$(skopeo inspect \
+            "$(_local_tls_flag)" \
+            --format '{{.Digest}}' \
+            "docker://${LOCAL_REGISTRY}/${local_name}:production" \
+            2>/dev/null || echo "none")
+
+        for (( i=0; i<to_delete; i++ )); do
+            tag="${ts_tags[$i]}"
+
+            manifest_digest=$(skopeo inspect \
+                "$(_local_tls_flag)" \
+                --format '{{.Digest}}' \
+                "docker://${LOCAL_REGISTRY}/${local_name}:${tag}" \
+                2>/dev/null) || {
+                log "  WARNING: could not inspect ${local_name}:${tag}. skipping"
+                continue
+            }
+
+            # Never delete the manifest that :production currently points to
+            if [[ "$manifest_digest" == "$prod_digest" ]]; then
+                log "  Skipping ${tag}: same digest as :production"
+                continue
+            fi
+
+            # Use curl, not skopeo delete. We want digest-level deletion, not tag-level.
+            if curl -sf -X DELETE \
+                "${scheme}://${LOCAL_REGISTRY}/v2/${local_name}/manifests/${manifest_digest}" \
+                -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+                2>/dev/null; then
+                log "  Deleted: ${local_name}:${tag}"
+                cleaned=$(( cleaned + 1 ))
+            else
+                log "  WARNING: DELETE failed for ${local_name}:${tag}. Registry may not have deletion enabled"
+                log "  See README.md and https://distribution.github.io/distribution/about/configuration/#delete"
+            fi
+        done
+    done
+
+    log "${cleaned} old image version(s) removed"
+fi
+
+# -- registry garbage collection ----------------------------------------------
+# Removes unreferenced layers left behind after tag deletion.
+# Requires: deletion enabled in registry config (storage.delete.enabled: true)
+REGISTRY_CONTAINER_NAME="${REGISTRY_CONTAINER_NAME:-staging-registry}"
+_RUNTIME="${CONTAINER_RUNTIME:-podman}"
+
+log "Running registry garbage collection (${_RUNTIME} exec ${REGISTRY_CONTAINER_NAME}) ..."
+
+if ! "$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" true 2>/dev/null; then
+    log "  WARNING: container '${REGISTRY_CONTAINER_NAME}' not running. Gargabe collection skipped"
+    log "  Make sure it is running: ${_RUNTIME} start ${REGISTRY_CONTAINER_NAME}"
+else
+    "$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" \
+        /bin/registry garbage-collect \
+        /etc/distribution/config.yml \
+        --delete-untagged=true \
+        2>&1 | tail -1 | while IFS= read -r line; do
+            log "  GC: $line"
+        done
+fi
+
+# -- prune old Trivy reports --------------------------------------------------
+if [[ -d "$TRIVY_REPORT_DIR" ]]; then
+    old_count=0
+    while IFS= read -r -d '' report; do
+        rm -f "$report"
+        old_count=$(( old_count + 1 ))
+    done < <(find "$TRIVY_REPORT_DIR" -name "*.json" -mtime +30 -print0)
+
+    [[ $old_count -gt 0 ]] && log "${old_count} Trivy report(s) older than 30 days removed"
+fi
+
+log "Cleanup complete."

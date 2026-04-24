@@ -1,0 +1,9 @@
+# ~/.config/systemd/user/iw-release.service
+[Unit]
+Description=image-warden: promote staged images to production
+Wants=staging-registry.service
+After=staging-registry.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/iw-release

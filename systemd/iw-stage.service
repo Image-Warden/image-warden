@@ -1,0 +1,9 @@
+# ~/.config/systemd/user/iw-stage.service
+[Unit]
+Description=image-warden: pull upstream images into staging
+Wants=staging-registry.service
+After=staging-registry.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/iw-stage

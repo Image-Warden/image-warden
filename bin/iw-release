@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# iw-release: Monitor quarantine timers and promote staged images to production
+#
+# Usage:
+#   iw-release
+#   iw-release --force-release <name> [--ignore-trivy]
+#   iw-release --notify-only
+#   iw-release --dry-run
+#
+# Options:
+#   -d, --dry-run                Show what would happen without scanning,
+#                                promoting, or modifying any state.
+#   -f, --force-release <name>   Promote immediately, skipping quarantine time.
+#                                Trivy scan still runs unless --ignore-trivy set.
+#       --ignore-trivy           Skip Trivy scan. Only valid with --force-release.
+#                                Use only when findings have been manually
+#                                reviewed!
+#   -n, --notify-only            After Trivy passes, send a notification instead
+#                                of promoting to :production. Repeat runs are
+#                                suppressed until a new digest is staged.
+#                                Can also be set permanently via NOTIFY_ONLY=1
+#                                in image-warden.conf.
+#                                --force-release always promotes regardless of
+#                                this flag.
+#   -h, --help                   Show this help. D'uh.
+
+set -euo pipefail
+
+# --- Paths ----------------------------------------------------------------
+_IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/image-warden"
+_IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
+_IW_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/image-warden"
+
+CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+SECRETS="${_IW_CONFIG_HOME}/secrets"
+NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
+
+# --- Argument parsing ----------------------------------------------------------------
+FORCE_RELEASE=""
+IGNORE_TRIVY=0
+DRY_RUN=false
+_NOTIFY_ONLY_FORCED=0
+
+usage() {
+    awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force-release|-f)
+            [[ -z "${2:-}" ]] && { echo "ERROR: --force-release requires an image name" >&2; exit 1; }
+            FORCE_RELEASE="$2"; shift 2 ;;
+        --ignore-trivy)
+            IGNORE_TRIVY=1; shift ;;
+        --dry-run|-d)
+            DRY_RUN=true; shift ;;
+        --notify-only|-n)
+            _NOTIFY_ONLY_FORCED=1; shift ;;
+        --help|-h)
+            usage ;;
+        *)
+            echo "ERROR: unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [[ $IGNORE_TRIVY -eq 1 && -z "$FORCE_RELEASE" ]]; then
+    echo "ERROR: --ignore-trivy is only valid together with --force-release" >&2
+    exit 1
+fi
+
+# -- Bootstrap -------------------------------------------------------------
+if [[ ! -f "$CONF" ]]; then
+    echo "ERROR: config not found: $CONF" >&2
+    echo "  Copy config/image-warden.conf.example to $CONF and edit it." >&2
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONF"
+
+if [[ -f "$SECRETS" ]]; then
+    # shellcheck source=/dev/null
+    source "$SECRETS"
+fi
+
+if [[ -f "$NOTIFY_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$NOTIFY_LIB"
+else
+    notify_released() { :; }
+    notify_blocked()  { :; }
+    notify_ready()    { :; }
+fi
+
+# Resolve NOTIFY_ONLY: config may set it (true/1); CLI flag always wins.
+case "${NOTIFY_ONLY:-0}" in
+    true|1) NOTIFY_ONLY=1 ;;
+    *)      NOTIFY_ONLY=0 ;;
+esac
+[[ $_NOTIFY_ONLY_FORCED -eq 1 ]] && NOTIFY_ONLY=1
+
+STATE_DIR="${_IW_STATE_HOME}"
+TRIVY_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
+mkdir -p "$STATE_DIR" "$TRIVY_REPORT_DIR"
+
+QUARANTINE_SECONDS=$(( ${QUARANTINE_HOURS:-72} * 3600 ))
+NOW=$(date '+%s')
+
+# -- Helpers ------------------------------------------------------------------
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# skopeo flags for the local registry (source and/or destination)
+_src_tls_flag()  {
+    [[ "${LOCAL_REGISTRY_TLS_VERIFY:-false}" == "false" ]] \
+        && echo "--src-tls-verify=false" || echo "--src-tls-verify=true"
+}
+_dest_tls_flag() {
+    [[ "${LOCAL_REGISTRY_TLS_VERIFY:-false}" == "false" ]] \
+        && echo "--dest-tls-verify=false" || echo "--dest-tls-verify=true"
+}
+_local_tls_flag() {
+    [[ "${LOCAL_REGISTRY_TLS_VERIFY:-false}" == "false" ]] \
+        && echo "--tls-verify=false" || echo "--tls-verify=true"
+}
+
+# -- Trivy scan ----------------------------------------------------------------
+# Returns:
+#   0 - clean
+#   1 - findings at or above severity threshold
+#   2 - trivy not installed (scan skipped)
+# Sets globals: TRIVY_VULN_COUNT, TRIVY_REPORT_FILE
+TRIVY_VULN_COUNT=""
+TRIVY_REPORT_FILE=""
+
+trivy_scan() {
+    local image="$1"
+    local name="$2"
+    local severity="${3:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}"
+    severity="${severity^^}"
+
+    TRIVY_VULN_COUNT=""
+    TRIVY_REPORT_FILE=""
+
+    if ! command -v trivy &>/dev/null; then
+        log "  WARNING: trivy not installed, security scan skipped"
+        return 2
+    fi
+
+    local report_file
+    report_file="${TRIVY_REPORT_DIR}/${name}_$(date '+%Y%m%d_%H%M%S').json"
+
+    log "  Trivy scan: checking severity >= ${severity} ..."
+
+    # TRIVY_INSECURE mirrors LOCAL_REGISTRY_TLS_VERIFY
+    local insecure="false"
+    [[ "${LOCAL_REGISTRY_TLS_VERIFY:-false}" == "false" ]] && insecure="true"
+
+    if TRIVY_INSECURE="$insecure" trivy image \
+        --severity "$severity" \
+        --exit-code 1 \
+        --format json \
+        --output "$report_file" \
+        --quiet \
+        "$image" 2>/dev/null; then
+        log "  Trivy scan: clean"
+        rm -f "$report_file"
+        return 0
+    else
+        TRIVY_VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities // [] | .[]] | length' \
+            "$report_file" 2>/dev/null || echo "?")
+        TRIVY_REPORT_FILE="$report_file"
+        log "  Trivy scan: ${TRIVY_VULN_COUNT} finding(s) at severity >= ${severity}"
+        log "  Report: $TRIVY_REPORT_FILE"
+        return 1
+    fi
+}
+
+# --- Main --------------------------------------------------------------------
+if [[ ${#IMAGES[@]} -eq 0 ]]; then
+    log "No images configured. Add entries to IMAGES in $CONF."
+    exit 0
+fi
+
+released=0
+blocked=0
+skipped=0
+pending=0
+
+for entry in "${IMAGES[@]}"; do
+    IFS='|' read -r _upstream local_name entry_severity entry_flags <<< "$entry"
+
+    # "notify_only" in field 3 to avoid confusion
+    if [[ "${entry_severity:-}" == "notify_only" ]]; then
+        entry_flags="notify_only"
+        entry_severity=""
+    fi
+
+    staged_at_file="${STATE_DIR}/${local_name}.staged_at"
+    staged_tag_file="${STATE_DIR}/${local_name}.staged_tag"
+
+    # No staged image on record
+    [[ ! -f "$staged_at_file" ]] && continue
+
+    # .staged_tag written by iw-stage; absent means old-format state, re-run iw-stage
+    if [[ ! -f "$staged_tag_file" ]]; then
+        log "${local_name}: WARNING: no .staged_tag state file - re-run iw-stage to refresh"
+        continue
+    fi
+
+    staged_tag=$(cat "$staged_tag_file")
+    staged_at=$(cat "$staged_at_file")
+    age=$(( NOW - staged_at ))
+
+    if [[ -n "$FORCE_RELEASE" && "$local_name" == "$FORCE_RELEASE" ]]; then
+        log "${local_name}: manual release requested, quarantine time bypassed"
+    elif [[ $age -lt $QUARANTINE_SECONDS ]]; then
+        remaining=$(( (QUARANTINE_SECONDS - age) / 3600 ))
+        log "${local_name}: ${remaining}h remaining in quarantine"
+        continue
+    else
+        log "${local_name}: quarantine elapsed, checking for release"
+    fi
+
+    # Verify staged image still exists in registry
+    staged_digest=$(skopeo inspect \
+        "$(_local_tls_flag)" \
+        --format '{{.Digest}}' \
+        "docker://${LOCAL_REGISTRY}/${local_name}:${staged_tag}" 2>/dev/null) || {
+        log "  WARNING: staged image (${local_name}:${staged_tag}) no longer in registry, cleaning up state"
+        rm -f "$staged_at_file" "$staged_tag_file"
+        continue
+    }
+
+    # Skip if :production already points to the same digest
+    prod_digest=$(skopeo inspect \
+        "$(_local_tls_flag)" \
+        --format '{{.Digest}}' \
+        "docker://${LOCAL_REGISTRY}/${local_name}:production" 2>/dev/null \
+        || echo "none")
+
+    if [[ "$staged_digest" == "$prod_digest" ]]; then
+        log "  Already released (digests identical), cleaning up state"
+        rm -f "$staged_at_file" "$staged_tag_file"
+        skipped=$(( skipped + 1 ))
+        continue
+    fi
+
+    # --- Dry-run shortcut -----------------------------------------------------------------
+    if $DRY_RUN; then
+        log "  [dry-run] Would run Trivy scan and promote ${local_name}:${staged_tag} to :production"
+        released=$(( released + 1 ))
+        continue
+    fi
+
+    # --- Trivy gate ------------------------------------------------------------------
+    if [[ $IGNORE_TRIVY -eq 1 && "$local_name" == "$FORCE_RELEASE" ]]; then
+        log "  WARNING: Trivy scan skipped (--ignore-trivy)"
+    else
+        scan_result=0
+        trivy_scan \
+            "${LOCAL_REGISTRY}/${local_name}:${staged_tag}" \
+            "$local_name" \
+            "${entry_severity:-}" || scan_result=$?
+
+        if [[ $scan_result -eq 1 ]]; then
+            log "  BLOCKED: ${local_name}:${staged_tag} failed Trivy gate"
+            notify_blocked "$local_name" "$staged_tag" "$TRIVY_VULN_COUNT" \
+                "${entry_severity:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}" \
+                "$TRIVY_REPORT_FILE"
+            blocked=$(( blocked + 1 ))
+            # staged_at_file kept: a future Trivy DB update or new upstream image
+            # may clear the finding on the next release run.
+            continue
+        fi
+        # scan_result 0 = clean, 2 = trivy absent (already warned in trivy_scan), both proceed to release
+    fi
+
+    # --- Notify-only gate ------------------------------------------------------------------
+    # --force-release always promotes regardless of NOTIFY_ONLY.
+    _image_notify_only=$NOTIFY_ONLY
+    [[ "${entry_flags:-}" == "notify_only" ]] && _image_notify_only=1
+
+    if [[ $_image_notify_only -eq 1 && -z "$FORCE_RELEASE" ]]; then
+        notify_pending_file="${STATE_DIR}/${local_name}.notify_pending"
+        if [[ -f "$notify_pending_file" && "$(cat "$notify_pending_file")" == "$staged_digest" ]]; then
+            log "  Notify-only: already notified for this digest, awaiting 'iw-release --force-release ${local_name}'"
+        else
+            log "  Notify-only: image passed gate, notifying instead of promoting"
+            notify_ready "$local_name" "$staged_tag" "$staged_digest"
+            echo "$staged_digest" > "$notify_pending_file"
+            pending=$(( pending + 1 ))
+        fi
+        continue
+    fi
+
+    # --- Promote :<staged_tag> → :production --------------------------------------------------
+    skopeo copy \
+        "$(_src_tls_flag)" \
+        "$(_dest_tls_flag)" \
+        --quiet \
+        "docker://${LOCAL_REGISTRY}/${local_name}:${staged_tag}" \
+        "docker://${LOCAL_REGISTRY}/${local_name}:production" || {
+        log "  ERROR: promotion failed"
+        continue
+    }
+
+    rm -f "$staged_at_file" "$staged_tag_file" "${STATE_DIR}/${local_name}.notify_pending"
+    log "  Released: ${local_name}:production (from :${staged_tag}) → ${staged_digest}"
+    notify_released "$local_name" "$staged_tag" "$staged_digest"
+    released=$(( released + 1 ))
+done
+
+# --- Summary ------------------------------------------------------------------
+if [[ -n "$FORCE_RELEASE" && $released -eq 0 && $blocked -eq 0 && $skipped -eq 0 ]]; then
+    echo "ERROR: image '${FORCE_RELEASE}' not found or no staged image present." >&2
+    exit 1
+fi
+
+[[ $blocked  -gt 0 ]] && \
+    log "WARNING: ${blocked} image(s) blocked by Trivy, see reports in ${TRIVY_REPORT_DIR}/"
+[[ $pending  -gt 0 ]] && \
+    log "${pending} image(s) ready, run 'iw-release --force-release <name>' to promote."
+[[ $released -gt 0 ]] && \
+    log "${released} image(s) released."
+
+log "Release run complete."

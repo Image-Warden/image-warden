@@ -1,0 +1,14 @@
+# Secrets
+config/secrets
+
+# Runtime config
+config/image-warden.conf
+
+# Registry data
+registry/data/
+registry/config.yml
+
+# Editor
+.vscode/
+*.swp
+*~

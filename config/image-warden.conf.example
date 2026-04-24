@@ -1,0 +1,122 @@
+# image-warden configuration
+# Copy to: ~/.config/image-warden/image-warden.conf
+#
+# XDG paths used by image-warden (set automatically, override if needed):
+#   Config : ${XDG_CONFIG_HOME:-$HOME/.config}/image-warden/
+#   State  : ${XDG_STATE_HOME:-$HOME/.local/state}/image-warden/
+#   Cache  : ${XDG_CACHE_HOME:-$HOME/.cache}/image-warden/
+#   Lib    : ${XDG_DATA_HOME:-$HOME/.local/share}/image-warden/lib/
+
+# ---------------------------------------------------------------------------
+# Quarantine duration in hours
+# ---------------------------------------------------------------------------
+QUARANTINE_HOURS=72
+
+# ---------------------------------------------------------------------------
+# Image retention
+#
+# Minimum number of timestamp-tagged versions to keep per image in the local
+# registry. iw-cleanup deletes older versions beyond this count, oldest first.
+# :production is never deleted regardless of this setting.
+#
+# Higher values give more rollback history and a larger buffer for multi-host
+# setups (where one host's cleanup must not delete a tag another host is still
+# quarantining). A value of 5 covers ~5 upstream releases per image.
+# ---------------------------------------------------------------------------
+KEEP_IMAGES=5
+
+# ---------------------------------------------------------------------------
+# Local staging registry
+#
+# Any OCI Distribution-compatible registry.
+# Examples:
+#   localhost:5000          local registry, no TLS (Podman Quadlet default)
+#   192.168.1.10:5000       LAN registry, no TLS
+#   registry.example.com    remote registry with valid TLS certificate
+#   registry.example.com:5000  remote registry with TLS on non-standard port
+# ---------------------------------------------------------------------------
+LOCAL_REGISTRY="localhost:5000"
+
+# ---------------------------------------------------------------------------
+# TLS verification for the local registry
+#
+# true  - enforce TLS; use for registries with a valid (or self-signed*)
+#         certificate. (*) For self-signed certs, don't forget to add the CA 
+#         to the system trust store instead of disabling verification here.
+# false - disable TLS verification; required for plain HTTP registries
+#         (e.g. localhost:5000 without TLS, typical for local registry setups).
+#
+# This flag controls:
+#   skopeo  --tls-verify / --src-tls-verify / --dest-tls-verify
+#   trivy   TRIVY_INSECURE environment variable
+#   curl    (registry API calls in iw-cleanup)
+# ---------------------------------------------------------------------------
+LOCAL_REGISTRY_TLS_VERIFY=false
+
+# ---------------------------------------------------------------------------
+# Container runtime
+#
+# podman or docker
+#
+# Controls which runtime is used for registry garbage collection in iw-cleanup.
+# ---------------------------------------------------------------------------
+CONTAINER_RUNTIME="docker"
+
+# ---------------------------------------------------------------------------
+# Staging registry container name
+#
+# Name of the running container that serves the local registry.
+# Used by iw-cleanup to trigger garbage collection via:
+#   <runtime> exec <name> /bin/registry garbage-collect ...
+#
+# Podman: must match "ContainerName=" in staging-registry.container (Quadlet)
+# Docker: must match the --name flag or "container_name:" in compose file
+# ---------------------------------------------------------------------------
+REGISTRY_CONTAINER_NAME="staging-registry"
+
+# ---------------------------------------------------------------------------
+# Trivy severity threshold. Severities that block promotion to :production
+# Possible values: CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN (comma-separated)
+# ---------------------------------------------------------------------------
+TRIVY_SEVERITY="CRITICAL,HIGH"
+
+# ---------------------------------------------------------------------------
+# Notification backends
+# List one or more: discord slack teams telegram ntfy
+# Leave empty to disable all notifications.
+# Webhook URLs and tokens go in ~/.config/image-warden/secrets
+# ---------------------------------------------------------------------------
+NOTIFY_BACKENDS=()
+
+# ---------------------------------------------------------------------------
+# Notify-only mode
+#
+# When set to 1, iw-release sends a notification after the quarantine time and
+# the optional Trivy gate passes but does NOT promote the configured images to
+# :production. Promotion then  requires a manual run:
+# iw-release --force-release <name>
+#
+# Useful if you prefer to review changelogs before every update.
+# Can be overridden per-run with the --notify-only / -n CLI flag.
+# --force-release always promotes regardless of this setting.
+# ---------------------------------------------------------------------------
+# NOTIFY_ONLY=1
+
+# ---------------------------------------------------------------------------
+# Tracked images
+# Format: upstream_ref|local_name[|trivy_severity_override[|notify_only]]
+#
+# upstream_ref      Full image reference including tag
+# local_name        Name in local registry (no tag)
+# trivy_severity    Optional per-image severity override; falls back to 
+#                   global TRIVY_SEVERITY.
+# notify_only       Literal string "notify_only", this image never auto-promotes;
+#                   use iw-release --force-release <name> to promote manually.
+#                   Overrides the global NOTIFY_ONLY setting for this image.
+# ---------------------------------------------------------------------------
+IMAGES=(
+  # "ghcr.io/advplyr/audiobookshelf:latest|audiobookshelf"
+  # "docker.io/library/nginx:stable|nginx|CRITICAL"
+  # "docker.io/library/traefik:latest|traefik|notify_only"         # global severity, no auto-promote
+  # "docker.io/library/alpine:latest|alpine|CRITICAL|notify_only"  # custom severity + no auto-promote
+)

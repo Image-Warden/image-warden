@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# iw-stage: Compare and pull upstream images into staging registry
+#
+# Tag format: <upstream-tag>_<YYYYMMDD-HHMM>  (UTC, from upstream Created date)
+# Examples:   stable_20260416-1700
+#             1.29_20260416-1700
+#
+# State written per image (XDG_STATE_HOME/image-warden/):
+#   <name>.digest     - last known upstream digest
+#   <name>.staged_tag - local registry tag (e.g. stable_20260416-1700)
+#   <name>.staged_at  - Unix timestamp of last successful stage
+#
+# Usage:
+#   iw-stage
+#
+# Options:
+#   -d, --dry-run  Check for new digests without copying.
+#   -h, --help     Show this help.
+
+set -euo pipefail
+
+# -- paths --------------------------------------------------------------------
+_IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/image-warden"
+_IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
+
+CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+SECRETS="${_IW_CONFIG_HOME}/secrets"
+NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
+
+usage() {
+    awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
+    exit 0
+}
+
+DRY_RUN=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)    usage ;;
+        -d|--dry-run) DRY_RUN=true; shift ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+# -- Bootstrap ----------------------------------------------------------------
+if [[ ! -f "$CONF" ]]; then
+    echo "ERROR: config not found: $CONF" >&2
+    echo "  Copy config/image-warden.conf.example to $CONF and edit it." >&2
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONF"
+
+if [[ -f "$SECRETS" ]]; then
+    # shellcheck source=/dev/null
+    source "$SECRETS"
+fi
+
+if [[ -f "$NOTIFY_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$NOTIFY_LIB"
+else
+    # Stub notify functions so scripts run without notifications installed
+    notify_staged()   { :; }
+fi
+
+STATE_DIR="${_IW_STATE_HOME}"
+mkdir -p "$STATE_DIR"
+
+# -- Helpers ------------------------------------------------------------------
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# Extract the tag portion from a full image reference.
+#   docker.io/library/nginx:stable  ->  stable
+#   docker.io/library/nginx         ->  latest   (no explicit tag)
+#   localhost:5000/myapp:v1.2       ->  v1.2
+_upstream_tag() {
+    local ref="$1" part
+    part="${ref##*:}"
+    # If the last colon was in host:port (part contains '/') or there is no colon
+    # at all, no explicit tag was given → default to 'latest'.
+    if [[ "$part" == "$ref" || "$part" == */* ]]; then
+        echo "latest"
+    else
+        echo "$part"
+    fi
+}
+
+_dest_tls_flag() {
+    if [[ "${LOCAL_REGISTRY_TLS_VERIFY:-false}" == "false" ]]; then
+        echo "--dest-tls-verify=false"
+    else
+        echo "--dest-tls-verify=true"
+    fi
+}
+
+# -- Main ---------------------------------------------------------------------
+if [[ ${#IMAGES[@]} -eq 0 ]]; then
+    log "No images configured. Add entries to IMAGES in $CONF."
+    exit 0
+fi
+
+# -- poor man's multithreading: get upstream digests and dates ----------------
+declare -A _inspect_pid _inspect_tmp _inspect_err
+
+log "Checking ${#IMAGES[@]} image(s) for updates..."
+for entry in "${IMAGES[@]}"; do
+    IFS='|' read -r upstream local_name _ <<< "$entry"
+    tmp="${STATE_DIR}/${local_name}.inspect_tmp"
+    err="${STATE_DIR}/${local_name}.inspect_err"
+    _inspect_tmp["$local_name"]="$tmp"
+    _inspect_err["$local_name"]="$err"
+    skopeo inspect \
+        --format '{{.Digest}}|{{.Created}}' \
+        "docker://${upstream}" \
+        > "$tmp" 2> "$err" &
+    _inspect_pid["$local_name"]=$!
+done
+
+for entry in "${IMAGES[@]}"; do
+    IFS='|' read -r upstream local_name _severity_override <<< "$entry"
+    tmp="${_inspect_tmp[$local_name]:-}"
+    err="${_inspect_err[$local_name]:-}"
+
+    log "Checking: $upstream"
+
+    inspect_out=""
+    if wait "${_inspect_pid[$local_name]}" 2>/dev/null && [[ -s "$tmp" ]]; then
+        inspect_out=$(< "$tmp")
+    fi
+    rm -f "$tmp"
+
+    if [[ -z "$inspect_out" ]]; then
+        err_msg=$(tr -d '\n' < "$err" 2>/dev/null)
+        rm -f "$err"
+        log "  WARNING: could not inspect ${upstream}, skipping${err_msg:+: $err_msg}"
+        continue
+    fi
+    rm -f "$err"
+
+    upstream_digest="${inspect_out%%|*}"
+    upstream_created="${inspect_out#*|}"
+
+    # Compare with last known digest
+    digest_file="${STATE_DIR}/${local_name}.digest"
+    last_digest=""
+    [[ -f "$digest_file" ]] && last_digest=$(cat "$digest_file")
+
+    if [[ "$upstream_digest" == "$last_digest" ]]; then
+        log "  No change ($upstream_digest)"
+        continue
+    fi
+
+    # Build local tag: <upstream-tag>_<YYYYMMDD-HHMM>
+    # Use UTC so tags are identical across hosts in different time zones
+    upstream_tag=$(_upstream_tag "$upstream")
+    _fallback_date=$(date -u '+%Y%m%d-%H%M')
+    local_date=$(date -u -d "${upstream_created% UTC}" '+%Y%m%d-%H%M' 2>/dev/null) \
+        || local_date=$(date -u -j -f '%Y-%m-%dT%H:%M:%S' "${upstream_created%%[.Z]*}" '+%Y%m%d-%H%M' 2>/dev/null) \
+        || local_date="$_fallback_date"
+
+    # fall back to current UTC date on Epoch-zero Created (scratch / distroless images)
+    if [[ "${local_date:0:4}" -lt 2000 ]]; then
+        log "  WARNING: upstream Created date unset, using current UTC date for tag"
+        local_date="$_fallback_date"
+    fi
+
+    local_tag="${upstream_tag}_${local_date}"
+
+    log "  New digest: $upstream_digest (was: ${last_digest:-none})"
+
+    if $DRY_RUN; then
+        log "  [dry-run] Would copy to ${LOCAL_REGISTRY}/${local_name}:${local_tag}"
+        continue
+    fi
+
+    log "  Copying to ${LOCAL_REGISTRY}/${local_name}:${local_tag} ..."
+
+    skopeo copy \
+        "$(_dest_tls_flag)" \
+        --quiet \
+        "docker://${upstream}" \
+        "docker://${LOCAL_REGISTRY}/${local_name}:${local_tag}" || {
+        log "  ERROR: copy failed, skipping"
+        continue
+    }
+
+    # keep state
+    echo "$upstream_digest" > "$digest_file"
+    echo "$local_tag"        > "${STATE_DIR}/${local_name}.staged_tag"
+    date '+%s'               > "${STATE_DIR}/${local_name}.staged_at"
+
+    release_eta=$(date -d "+${QUARANTINE_HOURS} hours" '+%Y-%m-%d %H:%M' 2>/dev/null \
+        || date -v "+${QUARANTINE_HOURS}H" '+%Y-%m-%d %H:%M' 2>/dev/null \
+        || echo "in ${QUARANTINE_HOURS}h")
+    log "  Staged as :${local_tag}. Quarantine ends: $release_eta"
+
+    notify_staged "$local_name" "$upstream" "$local_tag" "$upstream_digest" "$QUARANTINE_HOURS"
+done
+
+log "Stage run complete."

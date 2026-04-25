@@ -1,4 +1,4 @@
-<h1 align="center">Image-Warden
+<h1 align="center"><img src="img/image-warden_wide.png" alt="image-warden logo" width="660"/>
 
 [![License: MIT + Commons Clause](https://img.shields.io/badge/License-MIT%20%2B%20Commons%20Clause-blue?style=for-the-badge&logo=opensourceinitiative)](LICENSE)
 </h1>

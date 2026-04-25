@@ -5,7 +5,7 @@
 
 Running and auto-updating containers on `:latest` or mutable version tags can be a security risk. Recent supply-chain attacks have proven that over and over again. While pinning by SHA digest is the only truly immutable solution, managing those digests manually creates friction and ain't nobody got time for that. At least I don't.
 
-Image-Warden aims to automate the secure middle path. Every configured upstream image is automatically pulled by digest into a (local) staging registry, held for a configurable quarantine period (default 72h). This time delay is crucial to protect against upstream compromise or exploits that haven't reached CVE databases or hit the news yet. After the quarantine timer expires, the image is automatically scanned by [Trivy](https://github.com/aquasecurity/trivy) and will be promoted to `:production` if the scan comes back clean. Once an image safely passes quarantine, native tools like [Podman's `AutoUpdate=registry`](https://docs.podman.io/en/latest/markdown/podman-auto-update.1.html) can handle the container restart automatically.
+Image-Warden aims to automate the secure middle path. Every configured upstream image is automatically pulled by digest into a (local) staging registry and held for a configurable quarantine period (default 72h). This time delay is crucial to protect against upstream compromise or exploits that haven't reached CVE databases or hit the news yet. After the quarantine timer expires, the image is automatically scanned by [Trivy](https://github.com/aquasecurity/trivy) and will be promoted to `:production` if the scan comes back clean. Once an image safely passes quarantine, native tools like [Podman's `AutoUpdate=registry`](https://docs.podman.io/en/latest/markdown/podman-auto-update.1.html) can handle the container restart automatically.
 
 ## Disclaimer
 
@@ -69,10 +69,7 @@ cd image-warden
 bash install.sh
 ```
 
-The installer checks for missing dependencies, copies scripts and the
-notification library to their directories, creates symlinks in
-`~/.local/bin/`, installs systemd user units, reloads systemd user daemon 
-and writes default config files. Does not enable systemd timers for the three scripts.
+The installer checks for missing dependencies, copies scripts and the notification library to their directories, creates symlinks in `~/.local/bin/`, ~~installs systemd user units, reloads systemd user daemon~~ (currently disabled because not everyone is using systemd timers) and writes default config files.
 
 Re-run `bash install.sh` at any time to update scripts and units after a
 `git pull`. Existing config and secrets files are never overwritten.
@@ -214,7 +211,7 @@ AutoUpdate=registry
 Podman detects when `iw-release` copies a new digest to `:production` and
 restarts the container automatically.
 
-**Docker (Compose + restart tool):**
+**Docker (Compose):**
 
 ```yaml
 services:
@@ -255,9 +252,9 @@ longer needed.
 
 In no particular order:
 
-- cool logo!
+- ~~cool logo!~~
 - image-warden container deployment
-- set up TSL for (local) registry
+- set up TLS for (local) registry
 - add authentication to (local) registry
 - Web-UI (really low prio atm tbh)
 - troubleshooting document

@@ -96,41 +96,79 @@ _dest_tls_flag() {
 }
 
 _platform_flags() {
-    [[ -z "${PLATFORM:-}" ]] && return
-    local os arch variant
-    IFS='/' read -r os arch variant <<< "$PLATFORM"
-
-    case "$arch" in
-        x86_64|x86-64|x64)
-            log "  NOTICE: normalizing arch '$arch' -> 'amd64'"
-            arch="amd64" ;;
-        aarch64)
-            log "  NOTICE: normalizing arch '$arch' -> 'arm64'"
-            arch="arm64" ;;
-        armv7|armv7l|armhf)
-            log "  NOTICE: normalizing arch '$arch' -> 'arm' (variant v7)"
-            arch="arm"; variant="${variant:-v7}" ;;
-        arm64v8)
-            log "  NOTICE: normalizing arch '$arch' -> 'arm64'"
-            arch="arm64" ;;
-        armv6|armv6l)
-            log "  NOTICE: normalizing arch '$arch' -> 'arm' (variant v6)"
-            arch="arm"; variant="${variant:-v6}" ;;
-        amd64|arm64|arm|386|ppc64le|s390x|riscv64|mips64le)
-            ;; # canonical OCI values
-        "")
-            log "  ERROR: PLATFORM='$PLATFORM' missing arch (expected os/arch, e.g. linux/amd64)" >&2
-            exit 1 ;;
-        *)
-            log "  ERROR: unrecognized arch '$arch' in PLATFORM='$PLATFORM'" >&2
-            log "  Canonical values: amd64, arm64, arm, 386, ppc64le, s390x, riscv64, mips64le" >&2
-            exit 1 ;;
-    esac
-
-    local flags="--override-os=$os --override-arch=$arch"
-    [[ -n "${variant:-}" ]] && flags+=" --override-variant=$variant"
+    [[ -z "${_IW_PLAT_ARCH:-}" ]] && return
+    local flags="--override-os=$_IW_PLAT_OS --override-arch=$_IW_PLAT_ARCH"
+    [[ -n "$_IW_PLAT_VARIANT" ]] && flags+=" --override-variant=$_IW_PLAT_VARIANT"
     echo "$flags"
 }
+
+# -- Resolve upstream digest and Created date. --------------------------------
+_inspect_upstream() {
+    local upstream="$1"
+    if [[ -z "${_IW_PLAT_ARCH:-}" ]]; then
+        skopeo inspect --format '{{.Digest}}|{{.Created}}' "docker://${upstream}"
+        return
+    fi
+
+    local raw digest created
+    raw=$(skopeo inspect --raw "docker://${upstream}" 2>&1) || {
+        echo "$raw" >&2; return 1
+    }
+
+    digest=$(printf '%s' "$raw" | jq -r \
+        --arg os "$_IW_PLAT_OS" \
+        --arg arch "$_IW_PLAT_ARCH" \
+        --arg variant "$_IW_PLAT_VARIANT" \
+        '[.manifests[]? | select(
+            .platform.os == $os and
+            .platform.architecture == $arch and
+            ($variant == "" or .platform.variant == $variant)
+        )] | .[0].digest // empty' 2>/dev/null)
+
+    if [[ -z "$digest" ]]; then
+        skopeo inspect $(_platform_flags) \
+            --format '{{.Digest}}|{{.Created}}' "docker://${upstream}"
+        return
+    fi
+
+    created=$(skopeo inspect $(_platform_flags) \
+        --format '{{.Created}}' "docker://${upstream}" 2>/dev/null) || created=""
+    echo "${digest}|${created}"
+}
+
+# -- Normalize PLATFORM once --------------------------------------------------
+_IW_PLAT_OS="" _IW_PLAT_ARCH="" _IW_PLAT_VARIANT=""
+if [[ -n "${PLATFORM:-}" ]]; then
+    if ! command -v jq &>/dev/null; then
+        log "ERROR: 'jq' required when PLATFORM is set (multi-arch digest resolution)"
+        exit 1
+    fi
+    IFS='/' read -r _IW_PLAT_OS _IW_PLAT_ARCH _IW_PLAT_VARIANT <<< "$PLATFORM"
+    case "$_IW_PLAT_ARCH" in
+        x86_64|x86-64|x64)
+            log "NOTICE: normalizing arch '$_IW_PLAT_ARCH' -> 'amd64'"
+            _IW_PLAT_ARCH="amd64" ;;
+        aarch64|arm64v8)
+            log "NOTICE: normalizing arch '$_IW_PLAT_ARCH' -> 'arm64'"
+            _IW_PLAT_ARCH="arm64" ;;
+        armv7|armv7l|armhf)
+            log "NOTICE: normalizing arch '$_IW_PLAT_ARCH' -> 'arm' (variant v7)"
+            _IW_PLAT_ARCH="arm"; _IW_PLAT_VARIANT="${_IW_PLAT_VARIANT:-v7}" ;;
+        armv6|armv6l)
+            log "NOTICE: normalizing arch '$_IW_PLAT_ARCH' -> 'arm' (variant v6)"
+            _IW_PLAT_ARCH="arm"; _IW_PLAT_VARIANT="${_IW_PLAT_VARIANT:-v6}" ;;
+        amd64|arm64|arm|386|ppc64le|s390x|riscv64|mips64le)
+            ;; # canonical
+        "")
+            log "ERROR: PLATFORM='$PLATFORM' missing arch (expected os/arch, e.g. linux/amd64)"
+            exit 1 ;;
+        *)
+            log "ERROR: unrecognized arch '$_IW_PLAT_ARCH' in PLATFORM='$PLATFORM'"
+            log "Canonical values: amd64, arm64, arm, 386, ppc64le, s390x, riscv64, mips64le"
+            exit 1 ;;
+    esac
+    log "Platform: ${_IW_PLAT_OS}/${_IW_PLAT_ARCH}${_IW_PLAT_VARIANT:+/$_IW_PLAT_VARIANT}"
+fi
 
 # -- Main ---------------------------------------------------------------------
 if [[ ${#IMAGES[@]} -eq 0 ]]; then
@@ -148,11 +186,7 @@ for entry in "${IMAGES[@]}"; do
     err="${STATE_DIR}/${local_name}.inspect_err"
     _inspect_tmp["$local_name"]="$tmp"
     _inspect_err["$local_name"]="$err"
-    skopeo inspect \
-        $(_platform_flags) \
-        --format '{{.Digest}}|{{.Created}}' \
-        "docker://${upstream}" \
-        > "$tmp" 2> "$err" &
+    _inspect_upstream "$upstream" > "$tmp" 2> "$err" &
     _inspect_pid["$local_name"]=$!
 done
 

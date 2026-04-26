@@ -172,7 +172,7 @@ else
     "$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" \
         /bin/registry garbage-collect \
         /etc/distribution/config.yml \
-        --delete-untagged=true \
+        --delete-untagged=false \
         2>&1 | tail -1 | while IFS= read -r line; do
             log "  GC: $line"
         done

@@ -213,11 +213,17 @@ for entry in "${IMAGES[@]}"; do
     staged_at=$(cat "$staged_at_file")
     age=$(( NOW - staged_at ))
 
-    if [[ -n "$FORCE_RELEASE" && "$local_name" == "$FORCE_RELEASE" ]]; then
+    if [[ -n "$FORCE_RELEASE" && "$local_name" != "$FORCE_RELEASE" ]]; then
+        continue
+    elif [[ -n "$FORCE_RELEASE" && "$local_name" == "$FORCE_RELEASE" ]]; then
         log "${local_name}: manual release requested, quarantine time bypassed"
     elif [[ $age -lt $QUARANTINE_SECONDS ]]; then
-        remaining=$(( (QUARANTINE_SECONDS - age) / 3600 ))
-        log "${local_name}: ${remaining}h remaining in quarantine"
+        remaining_sec=$(( QUARANTINE_SECONDS - age ))
+        if [[ $remaining_sec -ge 3600 ]]; then
+            log "${local_name}: $(( remaining_sec / 3600 ))h remaining in quarantine"
+        else
+            log "${local_name}: $(( remaining_sec / 60 ))m remaining in quarantine"
+        fi
         continue
     else
         log "${local_name}: quarantine elapsed, checking for release"

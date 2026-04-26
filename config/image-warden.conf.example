@@ -75,6 +75,22 @@ CONTAINER_RUNTIME="docker"
 REGISTRY_CONTAINER_NAME="staging-registry"
 
 # ---------------------------------------------------------------------------
+# Platform override
+#
+# When set, only images for the specified platform are copied from multi-arch
+# upstream images. Format: os/arch[/variant] (e.g., linux/amd64, linux/arm/v7).
+#
+# Canonical arch (as in "architecture", not as in "I use Arch, btw.") values: 
+# amd64, arm64, arm, 386, ppc64le, s390x, riscv64, mips64le
+# See https://pkg.go.dev/internal/platform
+#
+# Common aliases (x86_64, aarch64, armhf, ...) are auto-normalized. I hope.
+#
+# Leave empty or unset to copy all platforms (default).
+# ---------------------------------------------------------------------------
+# PLATFORM="linux/amd64"
+
+# ---------------------------------------------------------------------------
 # Trivy severity threshold. Severities that block promotion to :production
 # Possible values: CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN (comma-separated)
 # ---------------------------------------------------------------------------

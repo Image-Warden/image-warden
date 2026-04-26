@@ -95,6 +95,43 @@ _dest_tls_flag() {
     fi
 }
 
+_platform_flags() {
+    [[ -z "${PLATFORM:-}" ]] && return
+    local os arch variant
+    IFS='/' read -r os arch variant <<< "$PLATFORM"
+
+    case "$arch" in
+        x86_64|x86-64|x64)
+            log "  NOTICE: normalizing arch '$arch' -> 'amd64'"
+            arch="amd64" ;;
+        aarch64)
+            log "  NOTICE: normalizing arch '$arch' -> 'arm64'"
+            arch="arm64" ;;
+        armv7|armv7l|armhf)
+            log "  NOTICE: normalizing arch '$arch' -> 'arm' (variant v7)"
+            arch="arm"; variant="${variant:-v7}" ;;
+        arm64v8)
+            log "  NOTICE: normalizing arch '$arch' -> 'arm64'"
+            arch="arm64" ;;
+        armv6|armv6l)
+            log "  NOTICE: normalizing arch '$arch' -> 'arm' (variant v6)"
+            arch="arm"; variant="${variant:-v6}" ;;
+        amd64|arm64|arm|386|ppc64le|s390x|riscv64|mips64le)
+            ;; # canonical OCI values
+        "")
+            log "  ERROR: PLATFORM='$PLATFORM' missing arch (expected os/arch, e.g. linux/amd64)" >&2
+            exit 1 ;;
+        *)
+            log "  ERROR: unrecognized arch '$arch' in PLATFORM='$PLATFORM'" >&2
+            log "  Canonical values: amd64, arm64, arm, 386, ppc64le, s390x, riscv64, mips64le" >&2
+            exit 1 ;;
+    esac
+
+    local flags="--override-os=$os --override-arch=$arch"
+    [[ -n "${variant:-}" ]] && flags+=" --override-variant=$variant"
+    echo "$flags"
+}
+
 # -- Main ---------------------------------------------------------------------
 if [[ ${#IMAGES[@]} -eq 0 ]]; then
     log "No images configured. Add entries to IMAGES in $CONF."
@@ -112,6 +149,7 @@ for entry in "${IMAGES[@]}"; do
     _inspect_tmp["$local_name"]="$tmp"
     _inspect_err["$local_name"]="$err"
     skopeo inspect \
+        $(_platform_flags) \
         --format '{{.Digest}}|{{.Created}}' \
         "docker://${upstream}" \
         > "$tmp" 2> "$err" &
@@ -178,6 +216,7 @@ for entry in "${IMAGES[@]}"; do
     log "  Copying to ${LOCAL_REGISTRY}/${local_name}:${local_tag} ..."
 
     skopeo copy \
+        $(_platform_flags) \
         "$(_dest_tls_flag)" \
         --quiet \
         "docker://${upstream}" \

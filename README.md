@@ -20,7 +20,7 @@ Image-Warden primarily consists of the following scripts:
 | Script name    | What it does |
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | iw-stage       | Compares the digest of each tracked upstream repository with the local one. Pulls new images and tags them with the upstream tag and creation date.                                                                                 |
-| iw-release     | Checks the time in quarantine for staged images. If quarantine is up scans the image with `trivy` for known CVE and tags it image as `:production` if the scan is ok. Can also be run manually to force release of an image and ignore `trivy` results. |
+| iw-release     | Checks the time in quarantine for staged images. If quarantine is up scans the image with `trivy` for known CVE and promotes it to `:production` if the scan is clean. Can also be run manually to force release of an image and ignore `trivy` results. |
 | iw-cleanup     | Removes images that are out of the configured retention. Removes unreferenced layers using registry garbage collection.                                                                                                             |
 | iw-notify-test | Sends a test notification to all enabled notification backends.                                                                                                                                                                     |
 
@@ -28,9 +28,9 @@ You can run the scripts manually or set up automation with systemd timers or cro
 
 | Timer                | Schedule   | What it does                                              |
 | -------------------- | ---------- | --------------------------------------------------------- |
-| `iw-stage.timer`     | daily      | Pulls new upstream digests into `:staged`                 |
+| `iw-stage.timer`     | daily      | Pulls new upstream digests into local staging tags         |
 | `iw-release.timer`   | every 6 h  | Runs Trivy, promotes clean images to `:production`        |
-| `iw-cleanup.timer`   | weekly     | Removes redundant `:staged` tags, runs registry GC        |
+| `iw-cleanup.timer`   | weekly     | Removes outdated staging tags, runs registry GC            |
 
 ## Somewhat detailed Flowcharts
 

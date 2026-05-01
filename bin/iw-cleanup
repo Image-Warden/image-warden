@@ -13,6 +13,7 @@
 #   iw-cleanup
 #
 # Options:
+#   -d, --dry-run   Show what would be deleted modifying registry/cache or deleting reports.
 #   -h, --help   Show this help.
 
 set -euo pipefail
@@ -26,12 +27,21 @@ _IW_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/image-warden"
 CONF="${_IW_CONFIG_HOME}/image-warden.conf"
 VALIDATE_LIB="${_IW_DATA_HOME}/lib/validate.sh"
 
+# --- Argument parsing --------------------------------------------------------
+DRY_RUN=false
+
 usage() {
     awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
     exit 0
 }
 
-[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d|--dry-run) DRY_RUN=true; shift ;;
+        -h|--help) usage ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
 
 # -- Lock (mutual exclusion with iw-stage / iw-release) --------------------
 mkdir -p "$_IW_STATE_HOME"
@@ -151,6 +161,12 @@ else
                 continue
             fi
 
+            if $DRY_RUN; then
+                log "  [dry-run] Would delete: ${local_name}:${tag} (${manifest_digest})"
+                cleaned=$(( cleaned + 1 ))
+                continue
+            fi
+
             # Use curl, not skopeo delete. We want digest-level deletion, not tag-level.
             if curl -sf -X DELETE \
                 "${scheme}://${LOCAL_REGISTRY}/v2/${local_name}/manifests/${manifest_digest}" \
@@ -165,7 +181,11 @@ else
         done
     done
 
-    log "${cleaned} old image version(s) removed"
+    if $DRY_RUN; then
+        log "[dry-run] ${cleaned} old image version(s) would be removed"
+    else
+        log "${cleaned} old image version(s) removed"
+    fi
 fi
 
 # -- registry garbage collection ----------------------------------------------
@@ -180,7 +200,9 @@ _RUNTIME="${CONTAINER_RUNTIME:-podman}"
 
 log "Running registry garbage collection (${_RUNTIME} exec ${REGISTRY_CONTAINER_NAME}) ..."
 
-if ! "$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" true 2>/dev/null; then
+if $DRY_RUN; then
+    log "[dry-run] Would run registry garbage collection (${_RUNTIME} exec ${REGISTRY_CONTAINER_NAME})"
+elif ! "$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" true 2>/dev/null; then
     log "  WARNING: container '${REGISTRY_CONTAINER_NAME}' not running. Gargabe collection skipped"
     log "  Make sure it is running: ${_RUNTIME} start ${REGISTRY_CONTAINER_NAME}"
 else
@@ -197,8 +219,12 @@ fi
 if [[ -d "$TRIVY_REPORT_DIR" ]]; then
     old_count=0
     while IFS= read -r -d '' report; do
-        rm -f "$report"
-        old_count=$(( old_count + 1 ))
+        if $DRY_RUN; then
+            log "[dry-run] Would remove Trivy report: $report"
+        else
+            rm -f "$report"
+            old_count=$(( old_count + 1 ))
+        fi
     done < <(find "$TRIVY_REPORT_DIR" -name "*.json" -mtime +30 -print0)
 
     [[ $old_count -gt 0 ]] && log "${old_count} Trivy report(s) older than 30 days removed"

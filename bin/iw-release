@@ -37,7 +37,7 @@ SECRETS="${_IW_CONFIG_HOME}/secrets"
 VALIDATE_LIB="${_IW_DATA_HOME}/lib/validate.sh"
 NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
 
-# --- Argument parsing ----------------------------------------------------------------
+# --- Argument parsing --------------------------------------------------------
 FORCE_RELEASE=""
 IGNORE_TRIVY=0
 DRY_RUN=false

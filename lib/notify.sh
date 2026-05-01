@@ -27,7 +27,7 @@
 #   notify_vuln     name vuln_id score description
 
 
-# ── Internal: colour/priority mapping ───────────────────────────────────────
+# -- Internal: colour/priority mapping ----------------------------------------
 
 _iw_discord_color() {
     case "$1" in
@@ -74,7 +74,7 @@ _iw_ntfy_tags() {
     esac
 }
 
-# ── Internal: curl wrapper ───────────────────────────────────────────────────
+# -- Internal: curl wrapper ---------------------------------------------------
 # Set IW_NOTIFY_DEBUG=1 to surface HTTP status and error responses.
 # Normal mode: fully silent, never fatal.
 _iw_curl() {
@@ -94,7 +94,7 @@ _iw_curl() {
     fi
 }
 
-# ── Internal: per-backend send functions ────────────────────────────────────
+# -- Internal: per-backend send functions -------------------------------------
 
 # _send_discord color_type title body
 _send_discord() {
@@ -194,7 +194,7 @@ _send_ntfy() {
         -d "$3"
 }
 
-# ── Internal: dispatch to all configured backends ───────────────────────────
+# -- Internal: dispatch to all configured backends ----------------------------
 
 # _notify_dispatch color_type event_hint title body
 _notify_dispatch() {
@@ -218,7 +218,7 @@ _notify_dispatch() {
     done
 }
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# -- Public API ---------------------------------------------------------------
 
 # notify_staged name upstream local_tag digest quarantine_hours
 notify_staged() {

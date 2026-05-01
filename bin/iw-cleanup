@@ -19,10 +19,12 @@ set -euo pipefail
 
 # -- Paths --------------------------------------------------------------------
 _IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/image-warden"
 _IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
 _IW_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/image-warden"
 
 CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+VALIDATE_LIB="${_IW_DATA_HOME}/lib/validate.sh"
 
 usage() {
     awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
@@ -30,6 +32,11 @@ usage() {
 }
 
 [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage
+
+# -- Lock (mutual exclusion with iw-stage / iw-release) --------------------
+mkdir -p "$_IW_STATE_HOME"
+exec 9>"${_IW_STATE_HOME}/lock"
+flock 9 || { echo "ERROR: cannot acquire lock" >&2; exit 1; }
 
 # -- Bootstrap ----------------------------------------------------------------
 if [[ ! -f "$CONF" ]]; then
@@ -40,6 +47,10 @@ fi
 
 # shellcheck source=/dev/null
 source "$CONF"
+
+# shellcheck source=/dev/null
+source "$VALIDATE_LIB"
+_iw_validate_config
 
 STATE_DIR="${_IW_STATE_HOME}"
 TRIVY_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
@@ -98,11 +109,11 @@ else
             continue
         }
 
-        # Filter to timestamp-tagged versions matching <upstream-tag>_YYYYMMDD-HHMM, sort oldest-first
+        # Filter to timestamp-tagged versions matching <upstream-tag>_YYYYMMDD-HHMM[_<digest>], sort oldest-first
         mapfile -t ts_tags < <(
             printf '%s' "$tags_json" \
             | jq -r --arg prefix "${upstream_tag}_" \
-                '[.tags[]? | select(test("^" + $prefix + "[0-9]{8}-[0-9]{4}$"))] | sort[]'
+                '[.tags[]? | select(test("^" + $prefix + "[0-9]{8}-[0-9]{4}(_[0-9a-f]{8})?$"))] | sort[]'
         )
 
         total=${#ts_tags[@]}
@@ -160,6 +171,10 @@ fi
 # -- registry garbage collection ----------------------------------------------
 # Removes unreferenced layers left behind after tag deletion.
 # Requires: deletion enabled in registry config (storage.delete.enabled: true)
+#
+# The global flock (acquired above) ensures no iw-stage/iw-release writes run
+# concurrently. External registry writes during GC are not guarded; for a
+# dedicated staging registry this is acceptable.
 REGISTRY_CONTAINER_NAME="${REGISTRY_CONTAINER_NAME:-staging-registry}"
 _RUNTIME="${CONTAINER_RUNTIME:-podman}"
 

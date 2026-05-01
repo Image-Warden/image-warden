@@ -34,6 +34,7 @@ _IW_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/image-warden"
 
 CONF="${_IW_CONFIG_HOME}/image-warden.conf"
 SECRETS="${_IW_CONFIG_HOME}/secrets"
+VALIDATE_LIB="${_IW_DATA_HOME}/lib/validate.sh"
 NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
 
 # --- Argument parsing ----------------------------------------------------------------
@@ -70,6 +71,11 @@ if [[ $IGNORE_TRIVY -eq 1 && -z "$FORCE_RELEASE" ]]; then
     exit 1
 fi
 
+# -- Lock (mutual exclusion with iw-stage / iw-cleanup) --------------------
+mkdir -p "$_IW_STATE_HOME"
+exec 9>"${_IW_STATE_HOME}/lock"
+flock 9 || { echo "ERROR: cannot acquire lock" >&2; exit 1; }
+
 # -- Bootstrap -------------------------------------------------------------
 if [[ ! -f "$CONF" ]]; then
     echo "ERROR: config not found: $CONF" >&2
@@ -79,6 +85,10 @@ fi
 
 # shellcheck source=/dev/null
 source "$CONF"
+
+# shellcheck source=/dev/null
+source "$VALIDATE_LIB"
+_iw_validate_config
 
 if [[ -f "$SECRETS" ]]; then
     # shellcheck source=/dev/null
@@ -100,6 +110,11 @@ case "${NOTIFY_ONLY:-0}" in
     *)      NOTIFY_ONLY=0 ;;
 esac
 [[ $_NOTIFY_ONLY_FORCED -eq 1 ]] && NOTIFY_ONLY=1
+
+case "${ALLOW_RELEASE_WITHOUT_SCANNER:-0}" in
+    true|1) ALLOW_RELEASE_WITHOUT_SCANNER=1 ;;
+    *)      ALLOW_RELEASE_WITHOUT_SCANNER=0 ;;
+esac
 
 STATE_DIR="${_IW_STATE_HOME}"
 TRIVY_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
@@ -283,6 +298,10 @@ for entry in "${IMAGES[@]}"; do
             blocked=$(( blocked + 1 ))
             # staged_at_file kept: a future Trivy DB update or new upstream image
             # may clear the finding on the next release run.
+            continue
+        elif [[ $scan_result -eq 2 && $ALLOW_RELEASE_WITHOUT_SCANNER -ne 1 ]]; then
+            log "  BLOCKED: no scanner available and ALLOW_RELEASE_WITHOUT_SCANNER not set"
+            blocked=$(( blocked + 1 ))
             continue
         elif [[ $scan_result -ne 0 && $scan_result -ne 2 ]]; then
             log "  BLOCKED: Trivy scan failed (exit code $scan_result), refusing to promote"

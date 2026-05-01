@@ -79,7 +79,7 @@ fi
 _bold "Checking dependencies ..."
 
 missing=0
-for cmd in skopeo jq curl; do
+for cmd in skopeo jq curl flock; do
     if command -v "$cmd" &>/dev/null; then
         ok "$cmd"
     else
@@ -104,7 +104,7 @@ fi
 if command -v trivy &>/dev/null; then
     ok "trivy found"
 else
-    skip "trivy not found. Optional Trivy scan gate will be skipped."
+    skip "trivy not found. Images will not be promoted without security scan unless ALLOW_RELEASE_WITHOUT_SCANNER=1 is set."
 fi
 
 if [[ $missing -gt 0 ]]; then
@@ -141,6 +141,8 @@ done
 
 # -- Install library -----------------------------------------------------------
 _bold "\nInstalling library ..."
+install -m 0644 "${SCRIPT_DIR}/lib/validate.sh" "${DATA_DIR}/lib/validate.sh"
+ok "Installed ${DATA_DIR}/lib/validate.sh"
 install -m 0644 "${SCRIPT_DIR}/lib/notify.sh" "${DATA_DIR}/lib/notify.sh"
 ok "Installed ${DATA_DIR}/lib/notify.sh"
 

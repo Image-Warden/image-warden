@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # iw-stage: Compare and pull upstream images into staging registry
 #
-# Tag format: <upstream-tag>_<YYYYMMDD-HHMM>  (UTC, from upstream Created date)
-# Examples:   stable_20260416-1700
-#             1.29_20260416-1700
+# Tag format: <upstream-tag>_<YYYYMMDD-HHMM>_<digest8>  (UTC, from upstream Created date)
+# Examples:   stable_20260416-1700_a1b2c3d4
+#             1.29_20260416-1700_deadbeef
 #
 # State written per image (XDG_STATE_HOME/image-warden/):
 #   <name>.digest     - last known upstream digest
@@ -26,6 +26,7 @@ _IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
 
 CONF="${_IW_CONFIG_HOME}/image-warden.conf"
 SECRETS="${_IW_CONFIG_HOME}/secrets"
+VALIDATE_LIB="${_IW_DATA_HOME}/lib/validate.sh"
 NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
 
 usage() {
@@ -42,6 +43,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# -- Lock (mutual exclusion with iw-release / iw-cleanup) --------------------
+mkdir -p "$_IW_STATE_HOME"
+exec 9>"${_IW_STATE_HOME}/lock"
+flock 9 || { echo "ERROR: cannot acquire lock" >&2; exit 1; }
+
 # -- Bootstrap ----------------------------------------------------------------
 if [[ ! -f "$CONF" ]]; then
     echo "ERROR: config not found: $CONF" >&2
@@ -51,6 +57,10 @@ fi
 
 # shellcheck source=/dev/null
 source "$CONF"
+
+# shellcheck source=/dev/null
+source "$VALIDATE_LIB"
+_iw_validate_config
 
 if [[ -f "$SECRETS" ]]; then
     # shellcheck source=/dev/null
@@ -238,7 +248,9 @@ for entry in "${IMAGES[@]}"; do
         local_date="$_fallback_date"
     fi
 
-    local_tag="${upstream_tag}_${local_date}"
+    digest_short="${upstream_digest#sha256:}"
+    digest_short="${digest_short:0:8}"
+    local_tag="${upstream_tag}_${local_date}_${digest_short}"
 
     log "  New digest: $upstream_digest (was: ${last_digest:-none})"
 

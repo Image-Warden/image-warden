@@ -87,6 +87,7 @@ mkdir -p ~/.config/systemd/user
 # 2. Install scripts and library
 install -m 0755 bin/iw-*   ~/.local/share/image-warden/bin/
 install -m 0644 lib/notify.sh ~/.local/share/image-warden/lib/
+install -m 0644 lib/validate.sh ~/.local/share/image-warden/lib/
 
 # 3. Create symlinks
 ln -sf ~/.local/share/image-warden/bin/iw-stage    ~/.local/bin/iw-stage
@@ -162,15 +163,20 @@ REGISTRY_CONTAINER_NAME="staging-registry"
 TRIVY_SEVERITY="CRITICAL,HIGH"
 
 # Tracked images
-# Format: upstream_ref|local_name[|trivy_severity_override[|notify_only]]
-IMAGES=(
-  "ghcr.io/advplyr/audiobookshelf:latest|audiobookshelf"
-  "docker.io/library/nginx:stable|nginx|CRITICAL"
-  "docker.io/library/alpine:latest|alpine|CRITICAL,HIGH|notify_only"
-)
+image "audiobookshelf" \
+  upstream="ghcr.io/advplyr/audiobookshelf:latest"
+
+image "nginx" \
+  upstream="docker.io/library/nginx:stable" \
+  severity="CRITICAL"
+
+image "alpine" \
+  upstream="docker.io/library/alpine:latest" \
+  severity="CRITICAL,HIGH" \
+  notify_only=true
 ```
 
-**First run behaviour:** any image in `IMAGES` that has no local state yet is
+**First run behaviour:** any configured image that has no local state yet is
 staged immediately on the next `iw-stage` run - no separate initialisation step needed. The quarantine clock starts from that first stage.
 
 ### 3. Configure notifications (optional)

@@ -42,42 +42,36 @@ _iw_validate_config() {
         errors=$(( errors + 1 ))
     fi
 
-    # -- IMAGES entries: validate local_name and check for duplicates ----------
-    if ! declare -p IMAGES &>/dev/null; then
-        echo "ERROR: IMAGES array is not defined" >&2
-        errors=$(( errors + 1 ))
-    elif [[ "$(declare -p IMAGES 2>/dev/null)" != declare\ -a* ]]; then
-        echo "ERROR: IMAGES must be a bash array, for example: IMAGES=(...)" >&2
-        errors=$(( errors + 1 ))
-    elif [[ ${#IMAGES[@]} -gt 0 ]]; then
+    # -- Image entries: validate names and check for duplicates -----------------
+    if [[ ${#_IW_IMAGES[@]} -gt 0 ]]; then
         declare -A _seen_names=()
-        local entry upstream local_name
+        local name upstream
 
-        for entry in "${IMAGES[@]}"; do
-            IFS='|' read -r upstream local_name _ <<< "$entry"
+        for name in "${_IW_IMAGES[@]}"; do
+            upstream="${_IW_CFG["$name.upstream"]:-}"
+
+            if [[ -z "$name" ]]; then
+                echo "ERROR: image entry has empty name" >&2
+                errors=$(( errors + 1 ))
+                continue
+            fi
 
             if [[ -z "$upstream" ]]; then
-                echo "ERROR: IMAGES entry has empty upstream reference: '$entry'" >&2
+                echo "ERROR: image '$name' has no upstream configured" >&2
                 errors=$(( errors + 1 ))
                 continue
             fi
 
-            if [[ -z "$local_name" ]]; then
-                echo "ERROR: IMAGES entry has empty local_name: '$entry'" >&2
-                errors=$(( errors + 1 ))
-                continue
-            fi
-
-            if [[ "$local_name" =~ [^a-zA-Z0-9._-] ]]; then
-                echo "ERROR: local_name '$local_name' contains invalid characters (allowed: a-z A-Z 0-9 . _ -)" >&2
+            if [[ "$name" =~ [^a-zA-Z0-9._-] ]]; then
+                echo "ERROR: image name '$name' contains invalid characters (allowed: a-z A-Z 0-9 . _ -)" >&2
                 errors=$(( errors + 1 ))
             fi
 
-            if [[ -n "${_seen_names[$local_name]+x}" ]]; then
-                echo "ERROR: duplicate local_name '$local_name' in IMAGES" >&2
+            if [[ -n "${_seen_names[$name]+x}" ]]; then
+                echo "ERROR: duplicate image name '$name'" >&2
                 errors=$(( errors + 1 ))
             fi
-            _seen_names["$local_name"]=1
+            _seen_names["$name"]=1
         done
     fi
 

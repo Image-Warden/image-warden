@@ -131,19 +131,45 @@ NOTIFY_BACKENDS=()
 
 # ---------------------------------------------------------------------------
 # Tracked images
-# Format: upstream_ref|local_name[|trivy_severity_override[|notify_only]]
 #
-# upstream_ref      Full image reference including tag
-# local_name        Name in local registry (no tag)
-# trivy_severity    Optional per-image severity override; falls back to 
-#                   global TRIVY_SEVERITY.
-# notify_only       Literal string "notify_only", this image never auto-promotes;
-#                   use iw-release --force-release <name> to promote manually.
-#                   Overrides the global NOTIFY_ONLY setting for this image.
+# Define each tracked image with an image() block:
+#
+#   image "name" \
+#     upstream="registry/image:tag" \       # required
+#     severity="CRITICAL,HIGH" \            # optional, falls back to TRIVY_SEVERITY
+#     notify_only=true                      # optional, default: false
+#
+# upstream       Full image reference including tag
+# severity       Per-image severity override for Trivy gate
+# notify_only    Image never auto-promotes; use
+#                iw-release --force-release <name> to promote manually.
+#                Overrides the global NOTIFY_ONLY setting for this image.
 # ---------------------------------------------------------------------------
-IMAGES=(
-  # "ghcr.io/advplyr/audiobookshelf:latest|audiobookshelf"
-  # "docker.io/library/nginx:stable|nginx|CRITICAL"
-  # "docker.io/library/traefik:latest|traefik|notify_only"         # global severity, no auto-promote
-  # "docker.io/library/alpine:latest|alpine|CRITICAL|notify_only"  # custom severity + no auto-promote
-)
+
+# image "audiobookshelf" \
+#   upstream="ghcr.io/advplyr/audiobookshelf:latest"
+
+# image "nginx" \
+#   upstream="docker.io/library/nginx:stable" \
+#   severity="CRITICAL"
+
+# image "traefik" \
+#   upstream="docker.io/library/traefik:latest" \
+#   notify_only=true
+
+# image "alpine" \
+#   upstream="docker.io/library/alpine:latest" \
+#   severity="CRITICAL" \
+#   notify_only=true
+
+# ---------------------------------------------------------------------------
+# Legacy format (deprecated, still supported)
+# Emits a deprecation notice on each run.
+# Format: upstream_ref|local_name[|severity[|notify_only]]
+# ---------------------------------------------------------------------------
+# IMAGES=(
+#   "ghcr.io/advplyr/audiobookshelf:latest|audiobookshelf"
+#   "docker.io/library/nginx:stable|nginx|CRITICAL"
+#   "docker.io/library/traefik:latest|traefik|notify_only"
+#   "docker.io/library/alpine:latest|alpine|CRITICAL|notify_only"
+# )

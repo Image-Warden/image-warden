@@ -26,6 +26,7 @@ _IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
 
 CONF="${_IW_CONFIG_HOME}/image-warden.conf"
 SECRETS="${_IW_CONFIG_HOME}/secrets"
+CONFIG_LIB="${_IW_DATA_HOME}/lib/config.sh"
 VALIDATE_LIB="${_IW_DATA_HOME}/lib/validate.sh"
 NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
 
@@ -56,7 +57,8 @@ if [[ ! -f "$CONF" ]]; then
 fi
 
 # shellcheck source=/dev/null
-source "$CONF"
+source "$CONFIG_LIB"
+_iw_load_config "$CONF"
 
 # shellcheck source=/dev/null
 source "$VALIDATE_LIB"
@@ -181,17 +183,17 @@ if [[ -n "${PLATFORM:-}" ]]; then
 fi
 
 # -- Main ---------------------------------------------------------------------
-if [[ ${#IMAGES[@]} -eq 0 ]]; then
-    log "No images configured. Add entries to IMAGES in $CONF."
+if [[ ${#_IW_IMAGES[@]} -eq 0 ]]; then
+    log "No images configured in $CONF."
     exit 0
 fi
 
 # -- poor man's multithreading: get upstream digests and dates ----------------
 declare -A _inspect_pid _inspect_tmp _inspect_err
 
-log "Checking ${#IMAGES[@]} image(s) for updates..."
-for entry in "${IMAGES[@]}"; do
-    IFS='|' read -r upstream local_name _ <<< "$entry"
+log "Checking ${#_IW_IMAGES[@]} image(s) for updates..."
+for local_name in "${_IW_IMAGES[@]}"; do
+    upstream="${_IW_CFG["$local_name.upstream"]}"
     tmp="${STATE_DIR}/${local_name}.inspect_tmp"
     err="${STATE_DIR}/${local_name}.inspect_err"
     _inspect_tmp["$local_name"]="$tmp"
@@ -200,8 +202,8 @@ for entry in "${IMAGES[@]}"; do
     _inspect_pid["$local_name"]=$!
 done
 
-for entry in "${IMAGES[@]}"; do
-    IFS='|' read -r upstream local_name _severity_override <<< "$entry"
+for local_name in "${_IW_IMAGES[@]}"; do
+    upstream="${_IW_CFG["$local_name.upstream"]}"
     tmp="${_inspect_tmp[$local_name]:-}"
     err="${_inspect_err[$local_name]:-}"
 

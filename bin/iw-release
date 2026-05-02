@@ -34,6 +34,7 @@ _IW_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/image-warden"
 
 CONF="${_IW_CONFIG_HOME}/image-warden.conf"
 SECRETS="${_IW_CONFIG_HOME}/secrets"
+CONFIG_LIB="${_IW_DATA_HOME}/lib/config.sh"
 VALIDATE_LIB="${_IW_DATA_HOME}/lib/validate.sh"
 NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
 
@@ -84,7 +85,8 @@ if [[ ! -f "$CONF" ]]; then
 fi
 
 # shellcheck source=/dev/null
-source "$CONF"
+source "$CONFIG_LIB"
+_iw_load_config "$CONF"
 
 # shellcheck source=/dev/null
 source "$VALIDATE_LIB"
@@ -193,8 +195,8 @@ trivy_scan() {
 }
 
 # --- Main --------------------------------------------------------------------
-if [[ ${#IMAGES[@]} -eq 0 ]]; then
-    log "No images configured. Add entries to IMAGES in $CONF."
+if [[ ${#_IW_IMAGES[@]} -eq 0 ]]; then
+    log "No images configured in $CONF."
     exit 0
 fi
 
@@ -203,14 +205,9 @@ blocked=0
 skipped=0
 pending=0
 
-for entry in "${IMAGES[@]}"; do
-    IFS='|' read -r _upstream local_name entry_severity entry_flags <<< "$entry"
-
-    # "notify_only" in field 3 to avoid confusion
-    if [[ "${entry_severity:-}" == "notify_only" ]]; then
-        entry_flags="notify_only"
-        entry_severity=""
-    fi
+for local_name in "${_IW_IMAGES[@]}"; do
+    entry_severity="${_IW_CFG["$local_name.severity"]:-}"
+    entry_notify_only="${_IW_CFG["$local_name.notify_only"]:-false}"
 
     staged_at_file="${STATE_DIR}/${local_name}.staged_at"
     staged_tag_file="${STATE_DIR}/${local_name}.staged_tag"
@@ -313,7 +310,7 @@ for entry in "${IMAGES[@]}"; do
     # --- Notify-only gate ------------------------------------------------------------------
     # --force-release always promotes regardless of NOTIFY_ONLY.
     _image_notify_only=$NOTIFY_ONLY
-    [[ "${entry_flags:-}" == "notify_only" ]] && _image_notify_only=1
+    [[ "$entry_notify_only" == "true" ]] && _image_notify_only=1
 
     if [[ $_image_notify_only -eq 1 && -z "$FORCE_RELEASE" ]]; then
         notify_pending_file="${STATE_DIR}/${local_name}.notify_pending"

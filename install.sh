@@ -141,6 +141,8 @@ done
 
 # -- Install library -----------------------------------------------------------
 _bold "\nInstalling library ..."
+install -m 0644 "${SCRIPT_DIR}/lib/config.sh" "${DATA_DIR}/lib/config.sh"
+ok "Installed ${DATA_DIR}/lib/config.sh"
 install -m 0644 "${SCRIPT_DIR}/lib/validate.sh" "${DATA_DIR}/lib/validate.sh"
 ok "Installed ${DATA_DIR}/lib/validate.sh"
 install -m 0644 "${SCRIPT_DIR}/lib/notify.sh" "${DATA_DIR}/lib/notify.sh"

@@ -254,8 +254,10 @@ In no particular order:
 
 - ~~cool logo!~~
 - image-warden container deployment
+- add Cosign/Notation checks
 - set up TLS for (local) registry
 - add authentication to (local) registry
+- rework Image configuration syntax
 - Web-UI (really low prio atm tbh)
 - troubleshooting document
 - add grype support

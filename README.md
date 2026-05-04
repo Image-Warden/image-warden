@@ -86,8 +86,8 @@ mkdir -p ~/.config/systemd/user
 
 # 2. Install scripts and library
 install -m 0755 bin/iw-*   ~/.local/share/image-warden/bin/
+install -m 0644 lib/config.sh ~/.local/share/image-warden/lib/
 install -m 0644 lib/notify.sh ~/.local/share/image-warden/lib/
-install -m 0644 lib/validate.sh ~/.local/share/image-warden/lib/
 
 # 3. Create symlinks
 ln -sf ~/.local/share/image-warden/bin/iw-stage    ~/.local/bin/iw-stage

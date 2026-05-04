@@ -76,7 +76,6 @@ _iw_ntfy_tags() {
 
 # -- Internal: curl wrapper ---------------------------------------------------
 # Set IW_NOTIFY_DEBUG=1 to surface HTTP status and error responses.
-# Normal mode: fully silent, never fatal.
 _iw_curl() {
     if [[ "${IW_NOTIFY_DEBUG:-0}" == "1" ]]; then
         local out http_code body
@@ -95,7 +94,6 @@ _iw_curl() {
 }
 
 # -- Internal: per-backend send functions -------------------------------------
-
 # _send_discord color_type title body
 _send_discord() {
     [[ -z "${DISCORD_WEBHOOK_URL:-}" ]] && return 0
@@ -195,7 +193,6 @@ _send_ntfy() {
 }
 
 # -- Internal: dispatch to all configured backends ----------------------------
-
 # _notify_dispatch color_type event_hint title body
 _notify_dispatch() {
     local color_type="$1"
@@ -212,14 +209,13 @@ _notify_dispatch() {
             teams)    _send_teams    "$color_type" "$title" "$body" ;;
             telegram) _send_telegram "$color_type" "$title" "$body" ;;
             ntfy)     _send_ntfy    "$color_type" "$title" "$body" "$event_hint" ;;
-            "")       ;;  # NOTIFY_BACKENDS unset → silent
+            "")       ;;  # NOTIFY_BACKENDS unset -> silent
             *)        echo "[image-warden] notify: unknown backend '${backend}'" >&2 ;;
         esac
     done
 }
 
 # -- Public API ---------------------------------------------------------------
-
 # notify_staged name upstream local_tag digest quarantine_hours
 notify_staged() {
     local name="$1" upstream="$2" local_tag="$3" digest="$4" hours="$5"
@@ -245,9 +241,7 @@ notify_released() {
 
     local body
     body="Tag: ${name}:${staged_tag} → :production
-Digest: ${digest:0:19}...
-
-podman auto-update will restart the container."
+Digest: ${digest:0:19}... "
 
     _notify_dispatch "success" "released" "Released: ${name}" "$body"
 }
@@ -264,6 +258,18 @@ Passed quarantine and Trivy gate. To promote:
   iw-release --force-release ${name}"
 
     _notify_dispatch "info" "ready" "Ready to release: ${name}" "$body"
+}
+
+# notify_legacy_config 
+notify_legacy_config() {
+    local name="$1"
+
+    local body
+    body="Legacy config detected for ${name}
+    
+    Please update your configuration to the new format. Refer to the documentation for guidance."
+
+    _notify_dispatch "error" "blocked" "Legacy config found!" "$body"
 }
 
 # notify_blocked name staged_tag vuln_count severity report_file

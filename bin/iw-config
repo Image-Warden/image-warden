@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# iw-config: configuration helper utilities for image-warden
+#
+# Usage:
+#   iw-config [--config PATH] legacy-to-dsl [config-file]
+#   iw-config [--config PATH] check [config-file]
+#
+# Commands:
+#   legacy-to-dsl   Print legacy IMAGES=() entries as image() DSL blocks.
+#                   The config file is not modified.
+#   check           Validate an Image-Warden config file without staging,
+#                   releasing, cleaning up, or sending notifications.
+#
+# Options:
+#   -c, --config PATH  Use an alternate config file.
+#   -h, --help         Show this help.
+
+set -euo pipefail
+
+_IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/image-warden"
+
+CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+CONFIG_LIB="${_IW_DATA_HOME}/lib/config.sh"
+
+usage() {
+    awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
+    exit 0
+}
+
+[[ $# -gt 0 ]] || usage
+
+CONFIG_EXPLICIT=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--config)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --config requires a path" >&2; exit 1; }
+            CONF="$2"; CONFIG_EXPLICIT=true; shift 2 ;;
+        --config=*)
+            CONF="${1#*=}"; CONFIG_EXPLICIT=true; shift ;;
+        -h|--help)
+            usage ;;
+        *)
+            break ;;
+    esac
+done
+
+[[ $# -gt 0 ]] || usage
+
+cmd="$1"
+shift
+
+conf="$CONF"
+conf_set=$CONFIG_EXPLICIT
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--config)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --config requires a path" >&2; exit 1; }
+            $conf_set && { echo "ERROR: config file specified more than once" >&2; exit 1; }
+            conf="$2"; conf_set=true; shift 2 ;;
+        --config=*)
+            $conf_set && { echo "ERROR: config file specified more than once" >&2; exit 1; }
+            conf="${1#*=}"; conf_set=true; shift ;;
+        -h|--help)
+            usage ;;
+        -*)
+            echo "ERROR: unknown option for ${cmd}: $1" >&2; exit 1 ;;
+        *)
+            $conf_set && { echo "ERROR: config file specified more than once" >&2; exit 1; }
+            conf="$1"; conf_set=true; shift ;;
+    esac
+done
+
+case "$cmd" in
+    check|validate)
+        if [[ -f "$conf" && -r "$conf" ]]; then
+            :
+        elif [[ -e "$conf" ]]; then
+            echo "ERROR: config exists but is not a readable regular file: $conf" >&2
+            exit 1
+        else
+            echo "ERROR: config not found: $conf" >&2
+            exit 1
+        fi
+
+        # shellcheck source=/dev/null
+        source "$CONFIG_LIB"
+
+        CONF="$conf"
+        _iw_load_config "$conf"
+        echo "OK: config valid: $conf"
+        ;;
+    legacy-to-dsl|convert)
+        if [[ -f "$conf" && -r "$conf" ]]; then
+            :
+        elif [[ -e "$conf" ]]; then
+            echo "ERROR: config exists but is not a readable regular file: $conf" >&2
+            exit 1
+        else
+            echo "ERROR: config not found: $conf" >&2
+            exit 1
+        fi
+
+        # shellcheck source=/dev/null
+        source "$CONFIG_LIB"
+
+        _iw_config_init
+        # shellcheck source=/dev/null
+        source "$conf"
+
+        _iw_legacy_config_as_dsl
+        ;;
+    -h|--help)
+        usage
+        ;;
+    *)
+        echo "ERROR: unknown command: $cmd" >&2
+        usage
+        ;;
+esac

@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# iw-cleanup: Enforce image retention policy and run registry garbage collection
+#
+# Pipeline step 3 (run on a schedule or manually):
+#   1. Prune oldest timestamp-tagged versions per image, keeping KEEP_IMAGES
+#      (default: 5). The configured production tag is never deleted.
+#   2. Run registry garbage collection to remove unreferenced layers.
+#      Requires deletion enabled in registry config
+#      (storage.delete.enabled: true) and the registry container running.
+#   3. Remove scanner reports older than 30 days from cache.
+#
+# Usage:
+#   iw-cleanup
+#
+# Options:
+#   -c, --config PATH   Use an alternate config file.
+#       --secrets PATH  Use an alternate notification secrets file.
+#   -d, --dry-run       Show what would be deleted without modifying registry/cache or deleting reports.
+#   -h, --help          Show this help.
+
+set -euo pipefail
+
+# -- Paths --------------------------------------------------------------------
+_IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/image-warden"
+_IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
+_IW_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/image-warden"
+
+CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+SECRETS="${_IW_CONFIG_HOME}/secrets"
+COMMON_LIB="${_IW_DATA_HOME}/lib/common.sh"
+CONFIG_LIB="${_IW_DATA_HOME}/lib/config.sh"
+CANDIDATE_LIB="${_IW_DATA_HOME}/lib/candidate.sh"
+NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
+
+# --- Argument parsing --------------------------------------------------------
+DRY_RUN=false
+SECRETS_EXPLICIT=false
+
+usage() {
+    awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c|--config)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --config requires a path" >&2; exit 1; }
+            CONF="$2"; shift 2 ;;
+        --config=*)
+            CONF="${1#*=}"; shift ;;
+        --secrets)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --secrets requires a path" >&2; exit 1; }
+            SECRETS="$2"; SECRETS_EXPLICIT=true; shift 2 ;;
+        --secrets=*)
+            SECRETS="${1#*=}"; SECRETS_EXPLICIT=true; shift ;;
+        -d|--dry-run) DRY_RUN=true; shift ;;
+        -h|--help) usage ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+# -- Bootstrap ----------------------------------------------------------------
+# shellcheck source=/dev/null
+source "$COMMON_LIB"
+# shellcheck disable=SC2034 # Read by _iw_event_log from common.sh.
+IW_EVENT_SOURCE="iw-cleanup"
+
+_iw_acquire_lock "${_IW_STATE_HOME}/lock" || exit 1
+
+if [[ -f "$CONF" && -r "$CONF" ]]; then
+    :
+elif [[ -e "$CONF" ]]; then
+    echo "ERROR: config exists but is not a readable regular file: $CONF" >&2
+    exit 1
+else
+    echo "ERROR: config not found: $CONF" >&2
+    echo "  Copy config/image-warden.conf.example to $CONF and edit it." >&2
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_LIB"
+# shellcheck source=/dev/null
+source "$CANDIDATE_LIB"
+_iw_load_config "$CONF" || exit 1
+
+if [[ -f "$SECRETS" && -r "$SECRETS" ]]; then
+    # shellcheck source=/dev/null
+    source "$SECRETS"
+elif [[ -e "$SECRETS" ]]; then
+    echo "ERROR: secrets exists but is not a readable regular file: $SECRETS" >&2
+    exit 1
+elif $SECRETS_EXPLICIT; then
+    echo "ERROR: secrets not found: $SECRETS" >&2
+    exit 1
+fi
+
+if [[ -f "$NOTIFY_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$NOTIFY_LIB"
+else
+    notify_cleanup()        { :; }
+    notify_cleanup_failed() { :; }
+fi
+
+STATE_DIR="${_IW_STATE_HOME}"
+TRIVY_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
+mkdir -p "$STATE_DIR"
+
+# -- Helpers -------------------------------------------------------------------
+_registry_scheme() {
+    _iw_bool_enabled "${LOCAL_REGISTRY_TLS_VERIFY:-false}" && echo "https" || echo "http"
+}
+
+# -- enforce retention policy -------------------------------------------------
+# List all timestamp-tagged versions for each image, sort oldest-first, and
+# delete any beyond KEEP_IMAGES. Defaults to "5" if KEEP_IMAGES not set.
+# Do not touch configured production tags
+cleaned=0
+cleanup_failed=0
+deleted_tags=()
+cleanup_failures=()
+
+if [[ ${#_IW_IMAGES[@]} -eq 0 ]]; then
+    log "No images configured in $CONF."
+else
+    _keep="${KEEP_IMAGES:-5}"
+    if ! [[ "$_keep" =~ ^[0-9]+$ ]] || [[ "$_keep" -le 0 ]]; then
+        log "ERROR: KEEP_IMAGES must be a positive integer (got '$_keep')."
+        exit 1
+    fi
+    scheme=$(_registry_scheme)
+
+    for local_name in "${_IW_IMAGES[@]}"; do
+        upstream="${_IW_CFG["$local_name.upstream"]}"
+        entry_production_tag="${_IW_CFG["$local_name.production_tag"]:-${PRODUCTION_TAG:-production}}"
+
+        upstream_tag=$(_upstream_tag "$upstream")
+
+        # Fetch the full tag list via skopeo
+        tags_json=$(_iw_retry "list tags ${LOCAL_REGISTRY}/${local_name}" \
+            skopeo list-tags \
+            "$(_local_tls_flag)" \
+            "docker://${LOCAL_REGISTRY}/${local_name}" \
+            2>/dev/null) || {
+            log "${local_name}: WARNING: could not list tags - skipping"
+            cleanup_failures+=("${local_name}: could not list tags")
+            cleanup_failed=$(( cleanup_failed + 1 ))
+            continue
+        }
+
+        # Filter to timestamp-tagged versions matching <upstream-tag>_YYYYMMDD-HHMM[_<digest>], sort oldest-first
+        mapfile -t ts_tags < <(
+            printf '%s' "$tags_json" \
+            | jq -r --arg prefix "${upstream_tag}_" \
+                '[(.Tags // .tags // [])[] | select(test("^" + $prefix + "[0-9]{8}-[0-9]{4}(_[0-9a-f]{8})?$"))] | sort[]'
+        )
+
+        total=${#ts_tags[@]}
+        to_delete=$(( total - _keep ))
+
+        if [[ $to_delete -le 0 ]]; then
+            log "${local_name}: ${total} version(s). within retention limit (keep ${_keep})"
+            continue
+        fi
+
+        log "${local_name}: ${total} version(s). pruning ${to_delete} oldest (keep ${_keep})"
+
+        # Fetch production digest once; used below to avoid deleting it
+        prod_digest=$(skopeo inspect \
+            "$(_local_tls_flag)" \
+            --format '{{.Digest}}' \
+            "docker://${LOCAL_REGISTRY}/${local_name}:${entry_production_tag}" \
+            2>/dev/null || echo "none")
+
+        # Build set of digests with active candidates (quarantine protection)
+        declare -A _protected_digests=()
+        _iw_candidate_list "$local_name"
+        for _cand_entry in "${_CAND_LIST[@]:-}"; do
+            [[ -z "$_cand_entry" ]] && continue
+            _cand_file="${_cand_entry#*|}"
+            if _iw_candidate_read "$_cand_file"; then
+                _protected_digests["$_CAND_DIGEST"]=1
+            fi
+        done
+
+        for (( i=0; i<to_delete; i++ )); do
+            tag="${ts_tags[$i]}"
+
+            manifest_digest=$(_iw_retry "inspect ${LOCAL_REGISTRY}/${local_name}:${tag}" \
+                skopeo inspect \
+                "$(_local_tls_flag)" \
+                --format '{{.Digest}}' \
+                "docker://${LOCAL_REGISTRY}/${local_name}:${tag}" \
+                2>/dev/null) || {
+                log "  WARNING: could not inspect ${local_name}:${tag}. skipping"
+                cleanup_failures+=("${local_name}:${tag}: could not inspect")
+                cleanup_failed=$(( cleanup_failed + 1 ))
+                continue
+            }
+
+            # Never delete the manifest that the configured production tag currently points to
+            if [[ "$manifest_digest" == "$prod_digest" ]]; then
+                log "  Skipping ${tag}: same digest as :${entry_production_tag}"
+                continue
+            fi
+
+            # Never delete images with active candidate state (in quarantine or awaiting scan)
+            if [[ -n "${_protected_digests[$manifest_digest]+x}" ]]; then
+                log "  Skipping ${tag}: active candidate (quarantine/pending)"
+                continue
+            fi
+
+            if $DRY_RUN; then
+                log "  [dry-run] Would delete: ${local_name}:${tag} (${manifest_digest})"
+                cleaned=$(( cleaned + 1 ))
+                continue
+            fi
+
+            # Use curl, not skopeo delete. We want digest-level deletion, not tag-level.
+            if _iw_retry "delete ${local_name}:${tag}" \
+                curl -sf -X DELETE \
+                "${scheme}://${LOCAL_REGISTRY}/v2/${local_name}/manifests/${manifest_digest}" \
+                -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+                2>/dev/null; then
+                log "  Deleted: ${local_name}:${tag}"
+                _iw_event_log "cleanup_deleted_tag" \
+                    --arg image "$local_name" \
+                    --arg tag "$tag" \
+                    --arg digest "$manifest_digest"
+                cleaned=$(( cleaned + 1 ))
+                deleted_tags+=("${local_name}:${tag}")
+            else
+                log "  WARNING: DELETE failed for ${local_name}:${tag}. Registry may not have deletion enabled"
+                log "  See README.md and https://distribution.github.io/distribution/about/configuration/#delete"
+                cleanup_failures+=("${local_name}:${tag}: DELETE failed")
+                cleanup_failed=$(( cleanup_failed + 1 ))
+            fi
+        done
+        unset _protected_digests
+    done
+
+    if $DRY_RUN; then
+        log "[dry-run] ${cleaned} old image version(s) would be removed"
+    else
+        log "${cleaned} old image version(s) removed"
+    fi
+fi
+
+# -- registry garbage collection ----------------------------------------------
+# Removes unreferenced layers left behind after tag deletion.
+# Requires: deletion enabled in registry config (storage.delete.enabled: true)
+#
+# The global flock (acquired above) ensures no iw-stage/iw-release writes run
+# concurrently. External registry writes during GC are not guarded; for a
+# dedicated staging registry this is acceptable.
+REGISTRY_CONTAINER_NAME="${REGISTRY_CONTAINER_NAME:-staging-registry}"
+_RUNTIME="${CONTAINER_RUNTIME:-podman}"
+
+log "Running registry garbage collection (${_RUNTIME} exec ${REGISTRY_CONTAINER_NAME}) ..."
+
+if $DRY_RUN; then
+    log "[dry-run] Would run registry garbage collection (${_RUNTIME} exec ${REGISTRY_CONTAINER_NAME})"
+elif ! "$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" true 2>/dev/null; then
+    log "  WARNING: container '${REGISTRY_CONTAINER_NAME}' not running. Garbage collection skipped"
+    log "  Make sure it is running: ${_RUNTIME} start ${REGISTRY_CONTAINER_NAME}"
+    cleanup_failures+=("registry GC skipped: container '${REGISTRY_CONTAINER_NAME}' not running")
+    cleanup_failed=$(( cleanup_failed + 1 ))
+else
+    "$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" \
+        /bin/registry garbage-collect \
+        /etc/distribution/config.yml \
+        --delete-untagged=false \
+        2>&1 | tail -1 | while IFS= read -r line; do
+            log "  GC: $line"
+        done
+    _iw_event_log "registry_gc" \
+        --arg runtime "$_RUNTIME" \
+        --arg container "$REGISTRY_CONTAINER_NAME"
+fi
+
+# -- prune old scanner reports ------------------------------------------------
+if [[ -d "$TRIVY_REPORT_DIR" ]]; then
+    old_count=0
+    while IFS= read -r -d '' report; do
+        if $DRY_RUN; then
+            log "[dry-run] Would remove scanner report: $report"
+        else
+            rm -f "$report"
+            old_count=$(( old_count + 1 ))
+            _iw_event_log "scanner_report_removed" \
+                --arg report "$report" \
+                --arg reason "older_than_30_days"
+        fi
+    done < <(find "$TRIVY_REPORT_DIR" -name "*.json" -mtime +30 -print0)
+
+    [[ $old_count -gt 0 ]] && log "${old_count} scanner report(s) older than 30 days removed"
+fi
+
+if ! $DRY_RUN; then
+    [[ ${cleaned:-0} -gt 0 ]] && notify_cleanup "$cleaned" "${deleted_tags[@]}"
+    [[ ${cleanup_failed:-0} -gt 0 ]] && notify_cleanup_failed "${cleanup_failures[@]}"
+fi
+
+log "Cleanup complete."

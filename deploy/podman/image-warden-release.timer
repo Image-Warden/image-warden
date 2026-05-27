@@ -1,0 +1,11 @@
+# Copy to ~/.config/containers/systemd/image-warden-release.timer
+
+[Unit]
+Description=Run Image-Warden release job every 6 hours
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

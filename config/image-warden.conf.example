@@ -1,0 +1,246 @@
+# image-warden configuration
+# Copy to: ~/.config/image-warden/image-warden.conf
+#
+# XDG paths used by image-warden (set automatically, override if needed):
+#   Config : ${XDG_CONFIG_HOME:-$HOME/.config}/image-warden/
+#   State  : ${XDG_STATE_HOME:-$HOME/.local/state}/image-warden/
+#   Cache  : ${XDG_CACHE_HOME:-$HOME/.cache}/image-warden/
+#   Lib    : ${XDG_DATA_HOME:-$HOME/.local/share}/image-warden/lib/
+
+# -----------------------------------------------------------------------------
+# Quarantine duration in hours
+# -----------------------------------------------------------------------------
+QUARANTINE_HOURS=72
+
+# -----------------------------------------------------------------------------
+# Image retention
+#
+# Minimum number of timestamp-tagged versions to keep per image in the local
+# registry. iw-cleanup deletes older versions beyond this count, oldest first.
+# The configured production tag is never deleted regardless of this setting.
+#
+# Higher values give more rollback history and a larger buffer for multi-host
+# setups (where one host's cleanup must not delete a tag another host is still
+# quarantining). A value of 5 covers ~5 upstream releases per image.
+# -----------------------------------------------------------------------------
+KEEP_IMAGES=5
+
+# -----------------------------------------------------------------------------
+# Production tag
+#
+# Tag promoted by iw-release after quarantine and scanner checks pass. Consumers
+# should pull this tag from the local registry. Can be overridden per image with
+# production_tag=.
+# -----------------------------------------------------------------------------
+PRODUCTION_TAG="production"
+
+# -----------------------------------------------------------------------------
+# Retry behavior for transient registry/network failures
+#
+# Applies to selected skopeo and registry API calls. Retry messages are logged
+# to stderr so command output can still be captured safely.
+# -----------------------------------------------------------------------------
+# IW_RETRY_ATTEMPTS=3
+# IW_RETRY_DELAY_SECONDS=5
+
+# -----------------------------------------------------------------------------
+# Image-release hook
+#
+# Optional executable run once per image after iw-release promotes it.
+# Hook failures are logged and recorded in events.log, but they do not roll back
+# or mark the already-promoted release as failed.
+#
+# Context is passed via environment variables:
+#   IW_IMAGE_NAME
+#   IW_RELEASE_FROM_TAG
+#   IW_RELEASE_TO_TAG
+#   IW_RELEASE_DIGEST
+#   IW_LOCAL_REGISTRY
+# -----------------------------------------------------------------------------
+# IMAGE_RELEASE_HOOK="/home/media/bin/iw-image-release"
+# IMAGE_RELEASE_HOOK_TIMEOUT=120
+
+# -----------------------------------------------------------------------------
+# Local staging registry
+#
+# Any OCI Distribution-compatible registry.
+# Examples:
+#   localhost:5000          local registry, no TLS (Podman Quadlet default)
+#   192.168.1.10:5000       LAN registry, no TLS
+#   registry.example.com    remote registry with valid TLS certificate
+#   registry.example.com:5000  remote registry with TLS on non-standard port
+# -----------------------------------------------------------------------------
+LOCAL_REGISTRY="localhost:5000"
+
+# -----------------------------------------------------------------------------
+# TLS verification for the local registry
+#
+# true  - enforce TLS; use for registries with a valid (or self-signed*)
+#         certificate. (*) For self-signed certs, don't forget to add the CA 
+#         to the system trust store instead of disabling verification here.
+# false - disable TLS verification; required for plain HTTP registries
+#         (e.g. localhost:5000 without TLS, typical for local registry setups).
+#
+# This flag controls:
+#   skopeo  --tls-verify / --src-tls-verify / --dest-tls-verify
+#   trivy   TRIVY_INSECURE environment variable
+#   grype   GRYPE_REGISTRY_INSECURE_* environment variables
+#   curl    (registry API calls in iw-cleanup)
+# -----------------------------------------------------------------------------
+LOCAL_REGISTRY_TLS_VERIFY=false
+
+# -----------------------------------------------------------------------------
+# Container runtime
+#
+# podman or docker
+#
+# Controls which runtime is used for registry garbage collection in iw-cleanup.
+# -----------------------------------------------------------------------------
+CONTAINER_RUNTIME="docker"
+
+# -----------------------------------------------------------------------------
+# Staging registry container name
+#
+# Name of the running container that serves the local registry.
+# Used by iw-cleanup to trigger garbage collection via:
+#   <runtime> exec <name> /bin/registry garbage-collect ...
+#
+# Podman: must match "ContainerName=" in staging-registry.container (Quadlet)
+# Docker: must match the --name flag or "container_name:" in compose file
+# -----------------------------------------------------------------------------
+REGISTRY_CONTAINER_NAME="staging-registry"
+
+# -----------------------------------------------------------------------------
+# Platform (recommended)
+#
+# Pin the platform so digest tracking is precise: without this, a rebuild of
+# any platform in a multi-arch manifest list triggers a redundant re-stage.
+# Format: os/arch[/variant] (e.g., linux/amd64, linux/arm/v7).
+#
+# Canonical arch (as in "architecture", not as in "I use Arch, btw.") values:
+# amd64, arm64, arm, 386, ppc64le, s390x, riscv64, mips64le
+# See https://pkg.go.dev/internal/platform
+#
+# Common aliases (x86_64, aarch64, armhf, ...) are auto-normalized. I hope.
+#
+# Leave empty or unset to use the host's native platform. Skopeo always
+# copies a single platform; multi-arch copy (--all) is not supported.
+# -----------------------------------------------------------------------------
+# PLATFORM="linux/amd64"
+
+# -----------------------------------------------------------------------------
+# Scanner engines and severity threshold
+#
+# Enable one or more scanners for iw-release. All enabled scanners must pass.
+# Grype scans use --only-fixed and are filtered against SCANNER_SEVERITY.
+# Severities that block promotion to the configured production tag.
+# Possible values: CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN (comma-separated)
+# TRIVY_SEVERITY is still accepted as a compatibility alias.
+# -----------------------------------------------------------------------------
+SCANNER_TRIVY=true
+SCANNER_GRYPE=false
+SCANNER_SEVERITY="CRITICAL,HIGH"
+
+# -----------------------------------------------------------------------------
+# Allow promotion without a security scanner
+#
+# By default, iw-release blocks promotion when configured scanners are not
+# installed. Set to true to allow promotion without a scan.
+# --force-release --ignore-scanner always promotes regardless of this setting.
+# -----------------------------------------------------------------------------
+# ALLOW_RELEASE_WITHOUT_SCANNER=true
+
+# -----------------------------------------------------------------------------
+# Notification backends
+# List one or more: discord slack teams telegram ntfy
+# Leave empty to disable all notifications.
+# Webhook URLs and tokens go in ~/.config/image-warden/secrets
+# -----------------------------------------------------------------------------
+NOTIFY_BACKENDS=()
+
+# -----------------------------------------------------------------------------
+# Notify-only mode
+#
+# When set to true, iw-release sends a notification after the quarantine time and
+# the scanner gate passes but does NOT promote the configured images to
+# the configured production tag. Promotion then requires a manual run:
+# iw-release --force-release <name>
+#
+# Useful if you prefer to review changelogs before every update.
+# Can be overridden per-run with the --notify-only / -n CLI flag.
+# --force-release always promotes regardless of this setting.
+# -----------------------------------------------------------------------------
+# NOTIFY_ONLY=true
+
+# -----------------------------------------------------------------------------
+# Tracked images
+#
+# Define each tracked image with an image() block:
+#
+#   image "name" \
+#     upstream="registry/image:tag" \       # required
+#     severity="CRITICAL,HIGH" \            # optional, falls back to SCANNER_SEVERITY
+#     quarantine_hours=72 \                 # optional, falls back to QUARANTINE_HOURS
+#     production_tag="latest" \             # optional, falls back to PRODUCTION_TAG
+#     platform="linux/amd64" \              # optional, falls back to PLATFORM
+#     scanners="trivy,grype" \              # optional, overrides global scanner toggles
+#     scanner_ignore="CVE-2025-1234,GHSA-abcd-1234-wxyz" \  # optional
+#     scanner_ignore_reason="not reachable in this deployment" \  # optional
+#     grype_ignore="CVE-2025-1234,GHSA-abcd-1234-wxyz" \  # optional
+#     grype_ignore_reason="not reachable in this deployment" \  # optional
+#     notify_only=true                      # optional, default: false
+#
+# upstream       Full image reference including tag
+# severity       Per-image severity override for scanner gate
+# quarantine_hours
+#                Per-image quarantine override. Uses the current config at
+#                release time; Image-Warden logs if the value differs from the
+#                value recorded when the candidate was staged.
+# production_tag Per-image release tag override. Consumers should pull this tag
+#                from the local registry.
+# platform       Per-image platform override. Falls back to global PLATFORM.
+#                Format: os/arch[/variant], e.g. linux/amd64 or linux/arm/v7.
+# scanners       Per-image scanner override. Comma-separated, no spaces.
+#                Currently supported names: trivy, grype.
+# scanner_ignore
+#                Per-image vulnerability identifiers for all scanners to ignore.
+#                Comma-separated, no spaces.
+# scanner_ignore_reason
+#                Optional free-text note logged when shared per-image ignores are used.
+# trivy_ignore   Per-image vulnerability identifiers for Trivy to ignore. Comma-separated,
+#                no spaces.
+#                Overrides scanner_ignore for Trivy when set.
+#                Written to a temporary .trivyignore for this image scan only.
+# trivy_ignore_reason
+#                Optional free-text note logged when per-image ignores are used.
+# grype_ignore   Per-image vulnerability identifiers for Grype to ignore. Comma-separated,
+#                no spaces.
+#                Overrides scanner_ignore for Grype when set.
+#                Written to a temporary Grype config for this image scan only.
+# grype_ignore_reason
+#                Optional free-text note logged when per-image ignores are used.
+# notify_only    Image never auto-promotes; use
+#                iw-release --force-release <name> to promote manually.
+#                Overrides the global NOTIFY_ONLY setting for this image.
+# -----------------------------------------------------------------------------
+
+# image "postgres" \
+#   upstream="dhi.io/postgres:latest"
+
+# image "nginx" \
+#   upstream="docker.io/library/nginx:stable" \
+#   severity="CRITICAL" \
+#   quarantine_hours=48 \
+#   production_tag="stable" \
+#   platform="linux/amd64"
+
+# image "traefik" \
+#   upstream="docker.io/library/traefik:latest" \
+#   notify_only=true
+
+# image "alpine" \
+#   upstream="docker.io/library/alpine:latest" \
+#   severity="CRITICAL" \
+#   scanner_ignore="CVE-2024-3094" \
+#   scanner_ignore_reason="accepted risk: vulnerable binary not used" \
+#   notify_only=true

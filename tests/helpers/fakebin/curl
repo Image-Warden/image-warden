@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo "curl $*" >> "${IW_FAKE_LOG:-/dev/null}"
+printf '{}\n'

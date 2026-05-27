@@ -1,0 +1,9 @@
+# ~/.config/systemd/user/iw-cleanup.service
+[Unit]
+Description=image-warden: clean up staged tags and run registry GC
+Wants=staging-registry.service
+After=staging-registry.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/iw-cleanup

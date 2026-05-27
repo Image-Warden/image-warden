@@ -1,0 +1,8 @@
+* text=auto eol=lf
+
+*.sh text eol=lf
+bin/iw-* text eol=lf
+install.sh text eol=lf
+Dockerfile text eol=lf
+config/*.example text eol=lf
+deploy/** text eol=lf

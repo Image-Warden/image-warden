@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# iw-history: show Image-Warden action history from events.log
+#
+# Usage:
+#   iw-history [options]
+#
+# Options:
+#   -i, --image NAME       Show events for one image.
+#   -e, --event EVENT      Show one event type.
+#       --source NAME      Show events from one iw-* command.
+#       --category NAME    Show events in one category.
+#       --scanner NAME     Show events for one scanner.
+#       --since TIME       Show events at or after TIME.
+#       --until TIME       Show events at or before TIME.
+#   -n, --limit N          Limit number of events shown.
+#       --reverse          Show oldest-first. Default is newest-first.
+#       --json             Print filtered raw JSONL instead of text.
+#       --utc              Show UTC timestamps in text output. Default is local time.
+#       --event-log PATH   Read a specific event log file.
+#   -h, --help             Show this help.
+
+set -euo pipefail
+
+_IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
+
+EVENT_LOG="${IW_EVENTS_LOG:-${_IW_STATE_HOME}/events.log}"
+FILTER_IMAGE=""
+FILTER_EVENT=""
+FILTER_SOURCE=""
+FILTER_CATEGORY=""
+FILTER_SCANNER=""
+SINCE=""
+UNTIL=""
+LIMIT=""
+REVERSE=false
+JSON_OUTPUT=false
+UTC_OUTPUT=false
+
+usage() {
+    awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
+    exit 0
+}
+
+_parse_time() {
+    local value="$1"
+    local bound="${2:-since}"
+    local epoch
+
+    [[ -n "$value" ]] || return 0
+
+    if [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+
+    case "$value" in
+        today|yesterday|tomorrow|[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+            if [[ "$bound" == "until" ]]; then
+                epoch=$(date -d "${value} 23:59:59" '+%s' 2>/dev/null) \
+                    || epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "${value} 23:59:59" '+%s' 2>/dev/null) \
+                    || {
+                        echo "ERROR: could not parse time: $value" >&2
+                        return 1
+                    }
+            else
+                epoch=$(date -d "${value} 00:00:00" '+%s' 2>/dev/null) \
+                    || epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "${value} 00:00:00" '+%s' 2>/dev/null) \
+                    || {
+                        echo "ERROR: could not parse time: $value" >&2
+                        return 1
+                    }
+            fi
+
+            date -u -d "@${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+                || date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null
+            return
+            ;;
+    esac
+
+    date -u -d "$value" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -j -f '%Y-%m-%d %H:%M:%S' "$value" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -j -f '%Y-%m-%d' "$value" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || {
+            echo "ERROR: could not parse time: $value" >&2
+            return 1
+        }
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i|--image)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --image requires a name" >&2; exit 1; }
+            FILTER_IMAGE="$2"; shift 2 ;;
+        --image=*)
+            FILTER_IMAGE="${1#*=}"; shift ;;
+        -e|--event)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --event requires an event name" >&2; exit 1; }
+            FILTER_EVENT="$2"; shift 2 ;;
+        --event=*)
+            FILTER_EVENT="${1#*=}"; shift ;;
+        --source)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --source requires a source name" >&2; exit 1; }
+            FILTER_SOURCE="$2"; shift 2 ;;
+        --source=*)
+            FILTER_SOURCE="${1#*=}"; shift ;;
+        --category)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --category requires a category name" >&2; exit 1; }
+            FILTER_CATEGORY="$2"; shift 2 ;;
+        --category=*)
+            FILTER_CATEGORY="${1#*=}"; shift ;;
+        --scanner)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --scanner requires a scanner name" >&2; exit 1; }
+            FILTER_SCANNER="$2"; shift 2 ;;
+        --scanner=*)
+            FILTER_SCANNER="${1#*=}"; shift ;;
+        --since)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --since requires a time" >&2; exit 1; }
+            SINCE="$(_parse_time "$2" since)"; shift 2 ;;
+        --since=*)
+            SINCE="$(_parse_time "${1#*=}" since)"; shift ;;
+        --until)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --until requires a time" >&2; exit 1; }
+            UNTIL="$(_parse_time "$2" until)"; shift 2 ;;
+        --until=*)
+            UNTIL="$(_parse_time "${1#*=}" until)"; shift ;;
+        -n|--limit)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --limit requires a number" >&2; exit 1; }
+            LIMIT="$2"; shift 2 ;;
+        --limit=*)
+            LIMIT="${1#*=}"; shift ;;
+        --reverse)
+            REVERSE=true; shift ;;
+        --json)
+            JSON_OUTPUT=true; shift ;;
+        --utc)
+            UTC_OUTPUT=true; shift ;;
+        --event-log)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --event-log requires a path" >&2; exit 1; }
+            EVENT_LOG="$2"; shift 2 ;;
+        --event-log=*)
+            EVENT_LOG="${1#*=}"; shift ;;
+        -h|--help)
+            usage ;;
+        *)
+            echo "ERROR: unknown option: $1" >&2
+            exit 1 ;;
+    esac
+done
+
+if [[ -n "$LIMIT" ]] && ! [[ "$LIMIT" =~ ^[0-9]+$ && "$LIMIT" -gt 0 ]]; then
+    echo "ERROR: --limit must be a positive integer, got: '$LIMIT'" >&2
+    exit 1
+fi
+
+command -v jq &>/dev/null || { echo "ERROR: jq is required" >&2; exit 1; }
+
+if [[ ! -f "$EVENT_LOG" ]]; then
+    echo "No history events found: $EVENT_LOG"
+    exit 0
+fi
+
+limit_expr='.'
+if [[ -n "$LIMIT" ]]; then
+    limit_expr=".[:${LIMIT}]"
+fi
+
+order_expr='reverse'
+if $REVERSE; then
+    order_expr='.'
+fi
+
+filtered_json=$(jq -c -s \
+    --arg image "$FILTER_IMAGE" \
+    --arg event "$FILTER_EVENT" \
+    --arg source "$FILTER_SOURCE" \
+    --arg category "$FILTER_CATEGORY" \
+    --arg scanner "$FILTER_SCANNER" \
+    --arg since "$SINCE" \
+    --arg until "$UNTIL" \
+    "[
+        .[]
+        | select((\$image == \"\" or (.image // \"\") == \$image)
+          and (\$event == \"\" or (.event // \"\") == \$event)
+          and (\$source == \"\" or (.source // \"\") == \$source)
+          and (\$category == \"\" or (.category // \"\") == \$category)
+          and (\$scanner == \"\" or (.scanner // \"\") == \$scanner)
+          and (\$since == \"\" or (.ts // \"\") >= \$since)
+          and (\$until == \"\" or (.ts // \"\") <= \$until))
+      ]
+      | sort_by(.ts // \"\")
+      | ${order_expr}
+      | ${limit_expr}
+      | .[]" "$EVENT_LOG") || {
+    echo "ERROR: could not parse event log: $EVENT_LOG" >&2
+    exit 1
+}
+
+if [[ -z "$filtered_json" ]]; then
+    echo "No matching history events."
+    exit 0
+fi
+
+if $JSON_OUTPUT; then
+    printf '%s\n' "$filtered_json"
+    exit 0
+fi
+
+printf '%s\n' "$filtered_json" | jq -r '
+  def local_ts:
+    if "'$UTC_OUTPUT'" == "true" then
+      (.ts // "?")
+    else
+      ((.ts // "") | sub("Z$"; "Z") | fromdateiso8601 | strflocaltime("%Y-%m-%d %H:%M:%S %Z"))
+    end;
+
+  def short_digest:
+    if (.digest // "") == "" then ""
+    else " digest=" + ((.digest | tostring)[0:19]) + "..."
+    end;
+
+  def details:
+    if .event == "staged" then
+      "staged :" + (.tag // "?") + short_digest + " from " + (.upstream // "?")
+    elif .event == "released" then
+      "released :" + (.from_tag // "?") + " -> :" + (.to_tag // "?") + short_digest
+    elif .event == "scan_blocked" then
+      "blocked :" + (.tag // "?") + " by " + (.scanner_label // .scanner // "scanner") +
+      " findings=" + (.finding_count // "?")
+    elif .event == "scan_clean" then
+      "scan clean :" + (.tag // "?") + " by " + (.scanner_label // .scanner // "scanner")
+    elif .event == "scan_error" then
+      "scan error :" + (.tag // "?") + " by " + (.scanner_label // .scanner // "scanner") +
+      " exit=" + (.exit_code // "?")
+    elif .event == "scanner_unavailable" then
+      "scanner unavailable :" + (.tag // "?") + " " + (.scanner_label // .scanner // "scanner")
+    elif .event == "scanner_gate_ignored" then
+      "scanner gate ignored :" + (.tag // "?") + short_digest
+    elif .event == "force_release_requested" then
+      "force release requested :" + (.tag // "?") + short_digest
+    elif .event == "image_release_hook_succeeded" then
+      "image-release hook succeeded :" + (.from_tag // "?") + " -> :" + (.to_tag // "?") +
+      " hook=" + (.hook // "?")
+    elif .event == "image_release_hook_failed" then
+      "image-release hook failed :" + (.from_tag // "?") + " -> :" + (.to_tag // "?") +
+      " exit=" + ((.exit_code // "?") | tostring) + " hook=" + (.hook // "?")
+    elif .event == "candidate_removed" then
+      "candidate removed :" + (.tag // "?") + " reason=" + (.reason // "?")
+    elif .event == "candidate_corrupt_removed" then
+      "corrupt candidate removed file=" + (.file // "?")
+    elif .event == "quarantine_accelerated_notified" then
+      "quarantine accelerated :" + (.tag // "?") + " " +
+      (.staged_hours // "?") + "h -> " + (.current_hours // "?") + "h"
+    elif .event == "notify_ready" then
+      "ready notification :" + (.tag // "?") + short_digest
+    elif .event == "cleanup_deleted_tag" then
+      "cleanup deleted :" + (.tag // "?") + short_digest
+    elif .event == "registry_gc" then
+      "registry gc runtime=" + (.runtime // "?") + " container=" + (.container // "?")
+    elif .event == "scanner_report_removed" then
+      "scanner report removed " + (.report // "?")
+    else
+      (.event // "event")
+    end;
+
+  local_ts + "  " +
+  ((.source // "-") | tostring) + "/" + ((.category // "-") | tostring) + "  " +
+  ((.image // "-") | tostring) + "  " + details
+'

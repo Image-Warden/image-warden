@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# iw-stage: Compare and pull upstream images into staging registry
+#
+# Tag format: <upstream-tag>_<YYYYMMDD-HHMM>_<digest8>  (UTC, from upstream Created date)
+# Examples:   stable_20260416-1700_a1b2c3d4
+#             1.29_20260416-1700_deadbeef
+#
+# State written under XDG_STATE_HOME/image-warden/:
+#   <name>.digest                    - last known upstream digest
+#   candidates/<name>/<digest>.json  - queued release candidate state
+#
+# Usage:
+#   iw-stage
+#   iw-stage <name>
+#
+# Options:
+#   -c, --config PATH   Use an alternate config file.
+#       --secrets PATH  Use an alternate notification secrets file.
+#   -d, --dry-run       Check for new digests without copying.
+#   -h, --help          Show this help.
+
+set -euo pipefail
+
+# -- paths --------------------------------------------------------------------
+_IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/image-warden"
+_IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
+
+CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+SECRETS="${_IW_CONFIG_HOME}/secrets"
+COMMON_LIB="${_IW_DATA_HOME}/lib/common.sh"
+CONFIG_LIB="${_IW_DATA_HOME}/lib/config.sh"
+CANDIDATE_LIB="${_IW_DATA_HOME}/lib/candidate.sh"
+NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
+
+usage() {
+    awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
+    exit 0
+}
+
+DRY_RUN=false
+SECRETS_EXPLICIT=false
+TARGET_IMAGE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help) usage ;;
+        -d|--dry-run) DRY_RUN=true; shift ;;
+        -c|--config)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --config requires a path" >&2; exit 1; }
+            CONF="$2"; shift 2 ;;
+        --config=*)
+            CONF="${1#*=}"; shift ;;
+        --secrets)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --secrets requires a path" >&2; exit 1; }
+            SECRETS="$2"; SECRETS_EXPLICIT=true; shift 2 ;;
+        --secrets=*)
+            SECRETS="${1#*=}"; SECRETS_EXPLICIT=true; shift ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1 ;;
+        *)
+            [[ -z "$TARGET_IMAGE" ]] || { echo "ERROR: only one image name can be specified" >&2; exit 1; }
+            TARGET_IMAGE="$1"; shift ;;
+    esac
+done
+
+# -- Bootstrap ----------------------------------------------------------------
+# shellcheck source=/dev/null
+source "$COMMON_LIB"
+# shellcheck disable=SC2034 # Read by _iw_event_log from common.sh.
+IW_EVENT_SOURCE="iw-stage"
+
+_iw_acquire_lock "${_IW_STATE_HOME}/lock" || exit 1
+
+if [[ -f "$CONF" && -r "$CONF" ]]; then
+    :
+elif [[ -e "$CONF" ]]; then
+    echo "ERROR: config exists but is not a readable regular file: $CONF" >&2
+    exit 1
+else
+    echo "ERROR: config not found: $CONF" >&2
+    echo "  Copy config/image-warden.conf.example to $CONF and edit it." >&2
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_LIB"
+# shellcheck source=/dev/null
+source "$CANDIDATE_LIB"
+_iw_load_config "$CONF" || exit 1
+
+if [[ -f "$SECRETS" && -r "$SECRETS" ]]; then
+    # shellcheck source=/dev/null
+    source "$SECRETS"
+elif [[ -e "$SECRETS" ]]; then
+    echo "ERROR: secrets exists but is not a readable regular file: $SECRETS" >&2
+    exit 1
+elif $SECRETS_EXPLICIT; then
+    echo "ERROR: secrets not found: $SECRETS" >&2
+    exit 1
+fi
+
+if [[ -f "$NOTIFY_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$NOTIFY_LIB"
+else
+    # Stub notify functions so scripts run without notifications installed
+    notify_staged()   { :; }
+fi
+
+STATE_DIR="${_IW_STATE_HOME}"
+mkdir -p "$STATE_DIR"
+
+# -- Resolve upstream digest and Created date. --------------------------------
+_inspect_upstream() {
+    local upstream="$1"
+    local platform_os="${2:-}" platform_arch="${3:-}" platform_variant="${4:-}"
+
+    if [[ -z "$platform_arch" ]]; then
+        _iw_retry "inspect ${upstream}" \
+            skopeo inspect --format '{{.Digest}}|{{.Created}}' "docker://${upstream}"
+        return
+    fi
+
+    local raw digest created
+    raw=$(_iw_retry "inspect raw ${upstream}" skopeo inspect --raw "docker://${upstream}") || return 1
+
+    digest=$(printf '%s' "$raw" | jq -r \
+        --arg os "$platform_os" \
+        --arg arch "$platform_arch" \
+        --arg variant "$platform_variant" \
+        '[.manifests[]? | select(
+            .platform.os == $os and
+            .platform.architecture == $arch and
+            ($variant == "" or .platform.variant == $variant)
+        )] | .[0].digest // empty' 2>/dev/null)
+
+    if [[ -z "$digest" ]]; then
+        # shellcheck disable=SC2046
+        _iw_retry "inspect ${upstream}" \
+            skopeo inspect $(_iw_platform_flags "$platform_os" "$platform_arch" "$platform_variant") \
+            --format '{{.Digest}}|{{.Created}}' "docker://${upstream}"
+        return
+    fi
+
+    # shellcheck disable=SC2046
+    created=$(_iw_retry "inspect created ${upstream}" \
+        skopeo inspect $(_iw_platform_flags "$platform_os" "$platform_arch" "$platform_variant") \
+        --format '{{.Created}}' "docker://${upstream}" 2>/dev/null) || created=""
+    echo "${digest}|${created}"
+}
+
+# -- Main ---------------------------------------------------------------------
+if [[ ${#_IW_IMAGES[@]} -eq 0 ]]; then
+    log "No images configured in $CONF."
+    exit 0
+fi
+
+if [[ -n "$TARGET_IMAGE" ]]; then
+    _iw_validate_local_name "$TARGET_IMAGE" || {
+        echo "ERROR: invalid image name: $TARGET_IMAGE" >&2
+        exit 1
+    }
+
+    if [[ -z "${_IW_CFG["$TARGET_IMAGE.upstream"]:-}" ]]; then
+        echo "ERROR: image '$TARGET_IMAGE' not found in $CONF" >&2
+        exit 1
+    fi
+
+    _IW_IMAGES=("$TARGET_IMAGE")
+fi
+
+# -- poor man's multithreading: get upstream digests and dates ----------------
+declare -A _inspect_pid _inspect_tmp _inspect_err _inspect_platform_os _inspect_platform_arch _inspect_platform_variant
+
+log "Checking ${#_IW_IMAGES[@]} image(s) for updates..."
+for local_name in "${_IW_IMAGES[@]}"; do
+    upstream="${_IW_CFG["$local_name.upstream"]}"
+    entry_platform="${_IW_CFG["$local_name.platform"]:-${PLATFORM:-}}"
+    tmp="${STATE_DIR}/${local_name}.inspect_tmp"
+    err="${STATE_DIR}/${local_name}.inspect_err"
+    _inspect_tmp["$local_name"]="$tmp"
+    _inspect_err["$local_name"]="$err"
+
+    if ! _iw_parse_platform "$entry_platform" "image '$local_name' platform"; then
+        exit 1
+    fi
+    _inspect_platform_os["$local_name"]="$_IW_PLAT_OS"
+    _inspect_platform_arch["$local_name"]="$_IW_PLAT_ARCH"
+    _inspect_platform_variant["$local_name"]="$_IW_PLAT_VARIANT"
+
+    _inspect_upstream \
+        "$upstream" \
+        "${_inspect_platform_os[$local_name]}" \
+        "${_inspect_platform_arch[$local_name]}" \
+        "${_inspect_platform_variant[$local_name]}" \
+        > "$tmp" 2> "$err" &
+    _inspect_pid["$local_name"]=$!
+done
+
+for local_name in "${_IW_IMAGES[@]}"; do
+    upstream="${_IW_CFG["$local_name.upstream"]}"
+    entry_quarantine_hours="${_IW_CFG["$local_name.quarantine_hours"]:-${QUARANTINE_HOURS:-72}}"
+    tmp="${_inspect_tmp[$local_name]:-}"
+    err="${_inspect_err[$local_name]:-}"
+    platform_os="${_inspect_platform_os[$local_name]:-}"
+    platform_arch="${_inspect_platform_arch[$local_name]:-}"
+    platform_variant="${_inspect_platform_variant[$local_name]:-}"
+
+    log "Checking ${local_name}: $upstream"
+    if [[ -n "$platform_arch" ]]; then
+        log "  Platform: ${platform_os}/${platform_arch}${platform_variant:+/$platform_variant}"
+    fi
+
+    inspect_out=""
+    if wait "${_inspect_pid[$local_name]}" 2>/dev/null && [[ -s "$tmp" ]]; then
+        inspect_out=$(< "$tmp")
+    fi
+    rm -f "$tmp"
+
+    if [[ -z "$inspect_out" ]]; then
+        err_msg=$(tr -d '\n' < "$err" 2>/dev/null)
+        rm -f "$err"
+        log "  WARNING: could not inspect ${upstream}, skipping${err_msg:+: $err_msg}"
+        continue
+    fi
+    rm -f "$err"
+
+    upstream_digest="${inspect_out%%|*}"
+    upstream_created="${inspect_out#*|}"
+
+    # Compare with last known digest
+    digest_file="${STATE_DIR}/${local_name}.digest"
+    last_digest=""
+    [[ -f "$digest_file" ]] && last_digest=$(cat "$digest_file")
+
+    if [[ "$upstream_digest" == "$last_digest" ]]; then
+        log "  No change ($upstream_digest)"
+        continue
+    fi
+
+    # Build local tag: <upstream-tag>_<YYYYMMDD-HHMM>
+    # Use UTC so tags are identical across hosts in different time zones
+    upstream_tag=$(_upstream_tag "$upstream")
+    _fallback_date=$(date -u '+%Y%m%d-%H%M')
+    local_date=$(date -u -d "${upstream_created% UTC}" '+%Y%m%d-%H%M' 2>/dev/null) \
+        || local_date=$(date -u -j -f '%Y-%m-%dT%H:%M:%S' "${upstream_created%%[.Z]*}" '+%Y%m%d-%H%M' 2>/dev/null) \
+        || local_date="$_fallback_date"
+
+    # fall back to current UTC date on Epoch-zero Created (scratch / distroless images)
+    if [[ "${local_date:0:4}" -lt 2000 ]]; then
+        log "  WARNING: upstream Created date unset, using current UTC date for tag"
+        local_date="$_fallback_date"
+    fi
+
+    digest_short="${upstream_digest#sha256:}"
+    digest_short="${digest_short:0:8}"
+    local_tag="${upstream_tag}_${local_date}_${digest_short}"
+
+    log "  New digest: $upstream_digest (was: ${last_digest:-none})"
+
+    # Skip if candidate already queued for this digest
+    if _iw_candidate_exists "$local_name" "$upstream_digest"; then
+        log "  Candidate already queued for this digest, skipping"
+        echo "$upstream_digest" > "$digest_file"
+        continue
+    fi
+
+    if $DRY_RUN; then
+        log "  [dry-run] Would copy to ${LOCAL_REGISTRY}/${local_name}:${local_tag}"
+        continue
+    fi
+
+    log "  Copying to ${LOCAL_REGISTRY}/${local_name}:${local_tag} ..."
+
+    # shellcheck disable=SC2046
+    _iw_retry "copy ${upstream} to ${LOCAL_REGISTRY}/${local_name}:${local_tag}" \
+        skopeo copy \
+        $(_iw_platform_flags "$platform_os" "$platform_arch" "$platform_variant") \
+        "$(_dest_tls_flag)" \
+        --quiet \
+        "docker://${upstream}" \
+        "docker://${LOCAL_REGISTRY}/${local_name}:${local_tag}" || {
+        log "  ERROR: copy failed, skipping"
+        continue
+    }
+
+    # Keep last-seen digest and queue candidate state.
+    echo "$upstream_digest" > "$digest_file"
+    staged_epoch=$(date '+%s')
+
+    _iw_candidate_write \
+        "$local_name" \
+        "$upstream" \
+        "$local_tag" \
+        "$upstream_digest" \
+        "$staged_epoch" \
+        "$entry_quarantine_hours"
+
+    release_eta=$(date -d "+${entry_quarantine_hours} hours" '+%Y-%m-%d %H:%M' 2>/dev/null \
+        || date -v "+${entry_quarantine_hours}H" '+%Y-%m-%d %H:%M' 2>/dev/null \
+        || echo "in ${entry_quarantine_hours}h")
+    log "  Staged as :${local_tag}. Quarantine ends: $release_eta"
+    _iw_event_log "staged" \
+        --arg image "$local_name" \
+        --arg upstream "$upstream" \
+        --arg tag "$local_tag" \
+        --arg digest "$upstream_digest" \
+        --arg quarantine_hours "$entry_quarantine_hours" \
+        --arg platform "${platform_arch:+${platform_os}/${platform_arch}${platform_variant:+/$platform_variant}}"
+
+    notify_staged "$local_name" "$upstream" "$local_tag" "$upstream_digest" "$entry_quarantine_hours"
+done
+
+log "Stage run complete."

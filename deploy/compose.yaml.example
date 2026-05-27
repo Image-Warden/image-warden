@@ -1,0 +1,77 @@
+# Image-Warden container deployment example.
+#
+# Works with Docker Compose and Podman Compose.
+#
+# Usage:
+#   docker compose -f deploy/compose.yaml.example build
+#   docker compose -f deploy/compose.yaml.example up -d registry
+#   docker compose -f deploy/compose.yaml.example run --rm image-warden iw-stage
+#
+# Podman:
+#   podman compose -f deploy/compose.yaml.example build
+#   podman compose -f deploy/compose.yaml.example up -d registry
+#   podman compose -f deploy/compose.yaml.example run --rm image-warden iw-stage
+#
+# Copy this file before editing. Adjust volume paths for your host.
+# If you move this file outside deploy/, set IMAGE_WARDEN_BUILD_CONTEXT to the
+# directory containing the Image-Warden Dockerfile.
+#
+# Expected host layout beside this compose file:
+#   ./config/image-warden.conf
+#   ./config/secrets
+#   ./registry/config.yml
+#   ./data/registry/
+#   ./data/state/
+#   ./data/cache/
+#
+# When Image-Warden runs from this compose network, set:
+#   LOCAL_REGISTRY="registry:5000"
+
+services:
+  registry:
+    image: docker.io/library/registry:3
+    container_name: staging-registry
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - ./data/registry:/var/lib/registry
+      - ./registry/config.yml:/etc/distribution/config.yml:ro
+    healthcheck:
+      test: >
+        sh -c "wget -q -O /dev/null --server-response
+        http://127.0.0.1:5000/v2/ 2>&1 | grep -qE 'HTTP/[0-9.]+ (200|401)'"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  image-warden:
+    build:
+      context: ${IMAGE_WARDEN_BUILD_CONTEXT:-..}
+      dockerfile: Dockerfile
+    image: localhost/image-warden:local
+    depends_on:
+      registry:
+        condition: service_healthy
+    environment:
+      XDG_CONFIG_HOME: /config
+      XDG_STATE_HOME: /state
+      XDG_CACHE_HOME: /cache
+      TRIVY_CACHE_DIR: /cache/trivy
+      GRYPE_DB_CACHE_DIR: /cache/grype/db
+    volumes:
+      - ./config:/config/image-warden:ro
+      - ./data/state:/state/image-warden
+      - ./data/cache:/cache
+    # The service is a job runner. Override with iw-stage, iw-release, iw-cleanup, etc.
+    command: ["iw-stage", "--help"]
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

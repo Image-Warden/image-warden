@@ -1,0 +1,9 @@
+# Copy to ~/.config/containers/systemd/image-warden.image
+#
+# Build locally:
+#   podman build -t localhost/image-warden:local /path/to/image-warden
+#
+# Or replace Image= with a published image when one exists.
+
+[Image]
+Image=localhost/image-warden:local

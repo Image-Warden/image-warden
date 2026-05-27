@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="${IW_FAKE_TRIVY_MODE:-clean}"
+out=""
+image=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --severity|--exit-code|--format)
+            shift 2 ;;
+        --output)
+            out="$2"; shift 2 ;;
+        --output=*)
+            out="${1#*=}"; shift ;;
+        --ignorefile)
+            echo "trivy ignorefile=$2" >> "${IW_FAKE_LOG:-/dev/null}"
+            shift 2 ;;
+        --quiet)
+            shift ;;
+        image)
+            shift ;;
+        -*)
+            shift
+            ;;
+        *)
+            image="$1"; shift ;;
+    esac
+done
+
+echo "trivy image=${image} mode=${mode} TRIVY_INSECURE=${TRIVY_INSECURE:-}" >> "${IW_FAKE_LOG:-/dev/null}"
+
+[[ -n "$out" ]] || exit 3
+mkdir -p "$(dirname -- "$out")"
+
+case "$mode" in
+    clean)
+        printf '{"Results":[]}\n' > "$out"
+        exit 0
+        ;;
+    blocked)
+        cat > "$out" <<'JSON'
+{"Results":[{"Target":"image","Vulnerabilities":[{"VulnerabilityID":"CVE-2099-0001","PkgName":"pkg","InstalledVersion":"1.0","FixedVersion":"1.1","Severity":"HIGH"}]}]}
+JSON
+        exit 1
+        ;;
+    empty)
+        : > "$out"
+        exit 1
+        ;;
+    invalid)
+        printf '{invalid\n' > "$out"
+        exit 1
+        ;;
+    error)
+        exit 3
+        ;;
+    *)
+        echo "unknown fake trivy mode: $mode" >&2
+        exit 3
+        ;;
+esac

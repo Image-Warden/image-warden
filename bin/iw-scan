@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# iw-scan: manually run configured scanner gate against an image
+#
+# Usage:
+#   iw-scan [options] <image-ref|local-name>
+#
+# Options:
+#   -c, --config PATH       Use an alternate config file.
+#       --scanner LIST      Override scanners for this run (trivy,grype).
+#       --severity LIST     Override scanner severity list.
+#       --tag TAG           Scan LOCAL_REGISTRY/<local-name>:<tag>.
+#                           Only valid when target is a configured local name.
+#   -h, --help              Show this help.
+#
+# If the target matches a configured image name, iw-scan scans the configured
+# local registry production tag by default. Otherwise, the target is treated as a
+# full image reference.
+
+set -euo pipefail
+
+# --- Paths --------------------------------------------------------------------
+_IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/image-warden"
+_IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
+_IW_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/image-warden"
+
+CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+COMMON_LIB="${_IW_DATA_HOME}/lib/common.sh"
+CONFIG_LIB="${_IW_DATA_HOME}/lib/config.sh"
+SCANNER_LIB="${_IW_DATA_HOME}/lib/scanner.sh"
+
+usage() {
+    awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
+    exit 0
+}
+
+SCANNER_OVERRIDE=""
+SEVERITY_OVERRIDE=""
+TAG_OVERRIDE=""
+TARGET=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help) usage ;;
+        -c|--config)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --config requires a path" >&2; exit 1; }
+            CONF="$2"; shift 2 ;;
+        --config=*)
+            CONF="${1#*=}"; shift ;;
+        --scanner|--scanners)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --scanner requires a comma-separated list" >&2; exit 1; }
+            SCANNER_OVERRIDE="$2"; shift 2 ;;
+        --scanner=*|--scanners=*)
+            SCANNER_OVERRIDE="${1#*=}"; shift ;;
+        --severity)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --severity requires a comma-separated list" >&2; exit 1; }
+            SEVERITY_OVERRIDE="$2"; shift 2 ;;
+        --severity=*)
+            SEVERITY_OVERRIDE="${1#*=}"; shift ;;
+        --tag)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --tag requires a tag" >&2; exit 1; }
+            TAG_OVERRIDE="$2"; shift 2 ;;
+        --tag=*)
+            TAG_OVERRIDE="${1#*=}"; shift ;;
+        -*)
+            echo "ERROR: unknown option: $1" >&2
+            exit 1 ;;
+        *)
+            [[ -z "$TARGET" ]] || { echo "ERROR: only one image target can be specified" >&2; exit 1; }
+            TARGET="$1"; shift ;;
+    esac
+done
+
+[[ -n "$TARGET" ]] || { echo "ERROR: image reference or local name required" >&2; usage; }
+
+# --- Bootstrap ----------------------------------------------------------------
+# shellcheck source=/dev/null
+source "$COMMON_LIB"
+# shellcheck disable=SC2034 # Read by _iw_event_log from common.sh.
+IW_EVENT_SOURCE="iw-scan"
+
+if [[ -f "$CONF" && -r "$CONF" ]]; then
+    :
+elif [[ -e "$CONF" ]]; then
+    echo "ERROR: config exists but is not a readable regular file: $CONF" >&2
+    exit 1
+else
+    echo "ERROR: config not found: $CONF" >&2
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_LIB"
+# shellcheck source=/dev/null
+source "$SCANNER_LIB"
+_iw_load_config "$CONF" || exit 1
+
+SCANNER_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
+STATE_DIR="${_IW_STATE_HOME}"
+mkdir -p "$STATE_DIR"
+mkdir -p "$SCANNER_REPORT_DIR"
+
+if [[ -n "$SCANNER_OVERRIDE" ]]; then
+    _iw_validate_scanner_list "--scanner" "$SCANNER_OVERRIDE" || exit 1
+fi
+
+if [[ -n "$SEVERITY_OVERRIDE" ]]; then
+    _iw_validate_severity_list "--severity" "$SEVERITY_OVERRIDE" || exit 1
+fi
+
+if [[ -n "$TAG_OVERRIDE" ]] && ! _iw_validate_tag_component "$TAG_OVERRIDE"; then
+    echo "ERROR: --tag must be a valid registry tag, got: '$TAG_OVERRIDE'" >&2
+    exit 1
+fi
+
+target_name=""
+scan_image="$TARGET"
+scan_tag="manual"
+scan_severity="${SEVERITY_OVERRIDE:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}"
+scan_scanners="$SCANNER_OVERRIDE"
+target_base="${TARGET%%:*}"
+target_tag=""
+[[ "$TARGET" == *:* ]] && target_tag="${TARGET#*:}"
+
+if [[ -n "${_IW_CFG["$TARGET.upstream"]:-}" ]]; then
+    target_name="$TARGET"
+    production_tag="${_IW_CFG["$TARGET.production_tag"]:-${PRODUCTION_TAG:-production}}"
+    scan_tag="${TAG_OVERRIDE:-$production_tag}"
+    scan_image="${LOCAL_REGISTRY}/${TARGET}:${scan_tag}"
+    scan_severity="${SEVERITY_OVERRIDE:-${_IW_CFG["$TARGET.severity"]:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}}"
+    scan_scanners="${SCANNER_OVERRIDE:-${_IW_CFG["$TARGET.scanners"]:-}}"
+elif [[ "$TARGET" == *:* && -n "${_IW_CFG["$target_base.upstream"]:-}" ]]; then
+    [[ -z "$TAG_OVERRIDE" ]] || {
+        echo "ERROR: --tag cannot be combined with local name:tag syntax" >&2
+        exit 1
+    }
+    if ! _iw_validate_tag_component "$target_tag"; then
+        echo "ERROR: target tag must be a valid registry tag, got: '$target_tag'" >&2
+        exit 1
+    fi
+
+    target_name="$target_base"
+    scan_tag="$target_tag"
+    scan_image="${LOCAL_REGISTRY}/${target_name}:${scan_tag}"
+    scan_severity="${SEVERITY_OVERRIDE:-${_IW_CFG["$target_name.severity"]:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}}"
+    scan_scanners="${SCANNER_OVERRIDE:-${_IW_CFG["$target_name.scanners"]:-}}"
+else
+    [[ -z "$TAG_OVERRIDE" ]] || {
+        echo "ERROR: --tag is only valid when target is a configured local image name" >&2
+        exit 1
+    }
+    target_name="${TARGET##*/}"
+    target_name="${target_name%%:*}"
+    target_name="${target_name//[^A-Za-z0-9_.-]/_}"
+    [[ -n "$target_name" ]] || target_name="manual-scan"
+fi
+
+_iw_scanner_init "$scan_scanners"
+
+if [[ ${#_IW_SCANNER_ENGINES[@]} -eq 0 ]]; then
+    echo "ERROR: no scanner enabled" >&2
+    exit 2
+fi
+
+log "Scanning ${scan_image} with ${_IW_SCANNER_ENGINES[*]} ..."
+
+blocked=0
+failed=0
+
+for scanner_engine in "${_IW_SCANNER_ENGINES[@]}"; do
+    scanner_label="$(_iw_scanner_label "$scanner_engine")"
+    scanner_ignore=""
+    scanner_ignore_reason=""
+
+    if [[ -n "$target_name" && -n "${_IW_CFG["$target_name.upstream"]:-}" ]]; then
+        shared_ignore="${_IW_CFG["$target_name.scanner_ignore"]:-}"
+        shared_ignore_reason="${_IW_CFG["$target_name.scanner_ignore_reason"]:-}"
+        case "$scanner_engine" in
+            trivy)
+                scanner_ignore="${_IW_CFG["$target_name.trivy_ignore"]:-$shared_ignore}"
+                scanner_ignore_reason="${_IW_CFG["$target_name.trivy_ignore_reason"]:-$shared_ignore_reason}"
+                ;;
+            grype)
+                scanner_ignore="${_IW_CFG["$target_name.grype_ignore"]:-$shared_ignore}"
+                scanner_ignore_reason="${_IW_CFG["$target_name.grype_ignore_reason"]:-$shared_ignore_reason}"
+                ;;
+        esac
+    fi
+
+    scan_result=0
+    _iw_scanner_scan \
+        "$scanner_engine" \
+        "$scan_image" \
+        "$target_name" \
+        "$scan_severity" \
+        "$scanner_ignore" \
+        "$scanner_ignore_reason" \
+        "$scan_tag" || scan_result=$?
+
+    case "$scan_result" in
+        0)
+            _iw_event_log "scan_clean" \
+                --arg mode "manual" \
+                --arg image "$target_name" \
+                --arg target "$scan_image" \
+                --arg tag "$scan_tag" \
+                --arg scanner "$scanner_engine" \
+                --arg scanner_label "$scanner_label" \
+                --arg severity "$scan_severity"
+            ;;
+        1)
+            log "  BLOCKED: ${scan_image} failed ${scanner_label} gate"
+            _iw_event_log "scan_blocked" \
+                --arg mode "manual" \
+                --arg image "$target_name" \
+                --arg target "$scan_image" \
+                --arg tag "$scan_tag" \
+                --arg scanner "$scanner_engine" \
+                --arg scanner_label "$scanner_label" \
+                --arg finding_count "$IW_SCANNER_FINDING_COUNT" \
+                --arg severity "$scan_severity" \
+                --arg report "$IW_SCANNER_REPORT_FILE"
+            blocked=$(( blocked + 1 ))
+            ;;
+        2)
+            log "  ERROR: ${scanner_label} scanner unavailable"
+            _iw_event_log "scanner_unavailable" \
+                --arg mode "manual" \
+                --arg image "$target_name" \
+                --arg target "$scan_image" \
+                --arg tag "$scan_tag" \
+                --arg scanner "$scanner_engine" \
+                --arg scanner_label "$scanner_label"
+            failed=$(( failed + 1 ))
+            ;;
+        *)
+            log "  ERROR: ${scanner_label} scan failed (exit code ${scan_result})"
+            _iw_event_log "scan_error" \
+                --arg mode "manual" \
+                --arg image "$target_name" \
+                --arg target "$scan_image" \
+                --arg tag "$scan_tag" \
+                --arg scanner "$scanner_engine" \
+                --arg scanner_label "$scanner_label" \
+                --arg exit_code "$scan_result"
+            failed=$(( failed + 1 ))
+            ;;
+    esac
+done
+
+if [[ $failed -gt 0 ]]; then
+    log "Scan complete with ${failed} scanner error(s)."
+    exit 2
+fi
+
+if [[ $blocked -gt 0 ]]; then
+    log "Scan complete: ${blocked} scanner gate(s) blocked."
+    exit 1
+fi
+
+log "Scan complete: clean."

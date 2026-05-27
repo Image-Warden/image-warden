@@ -1,0 +1,34 @@
+# Copy to ~/.config/containers/systemd/image-warden-stage.container
+
+[Unit]
+Description=Image-Warden stage job
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=localhost/image-warden:local
+ContainerName=image-warden-stage
+AutoUpdate=disabled
+Exec=iw-stage
+
+# The job must reach the registry. Use host networking for the simple localhost
+# registry case, or replace this with a shared Podman network.
+Network=host
+
+# Adjust these paths before use.
+Volume=%h/.config/image-warden:/config/image-warden:Z,ro
+Volume=%h/.local/state/image-warden:/state/image-warden:Z
+Volume=%h/.cache/image-warden:/cache:Z
+
+Environment=XDG_CONFIG_HOME=/config
+Environment=XDG_STATE_HOME=/state
+Environment=XDG_CACHE_HOME=/cache
+Environment=TRIVY_CACHE_DIR=/cache/trivy
+Environment=GRYPE_DB_CACHE_DIR=/cache/grype/db
+
+DropCapability=ALL
+NoNewPrivileges=true
+
+[Service]
+Type=oneshot
+Restart=no

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "skopeo $*" >> "${IW_FAKE_LOG:-/dev/null}"
+
+digest="${IW_FAKE_UPSTREAM_DIGEST:-sha256:1111111111111111111111111111111111111111111111111111111111111111}"
+prod_digest="${IW_FAKE_PROD_DIGEST:-sha256:9999999999999999999999999999999999999999999999999999999999999999}"
+created="${IW_FAKE_UPSTREAM_CREATED:-2099-01-02T03:04:05Z}"
+
+format=""
+raw=false
+ref=""
+args=("$@")
+for (( i = 0; i < ${#args[@]}; i++ )); do
+    case "${args[$i]}" in
+        --format)
+            format="${args[$(( i + 1 ))]:-}" ;;
+        --raw)
+            raw=true ;;
+        docker://*)
+            ref="${args[$i]}" ;;
+    esac
+done
+
+case "${1:-}" in
+    list-tags)
+        cat <<'JSON'
+{"Repository":"127.0.0.1:5000/app","Tags":["stable","stable_20990101-0000_aaaaaaaa","stable_20990102-0000_bbbbbbbb","stable_20990103-0000_cccccccc"]}
+JSON
+        ;;
+    inspect)
+        if $raw; then
+            cat <<JSON
+{"manifests":[{"digest":"${digest}","platform":{"os":"linux","architecture":"arm","variant":"v7"}},{"digest":"${digest}","platform":{"os":"linux","architecture":"amd64"}}]}
+JSON
+            exit 0
+        fi
+
+        result_digest="$digest"
+        if [[ "$ref" == docker://127.0.0.1:5000/* && "$ref" != *_20* ]]; then
+            result_digest="$prod_digest"
+        fi
+
+        case "$format" in
+            "{{.Digest}}|{{.Created}}")
+                printf '%s|%s\n' "$result_digest" "$created" ;;
+            "{{.Created}}")
+                printf '%s\n' "$created" ;;
+            "{{.Digest}}")
+                printf '%s\n' "$result_digest" ;;
+            *)
+                printf '{"Digest":"%s","Created":"%s"}\n' "$result_digest" "$created" ;;
+        esac
+        ;;
+    copy|delete)
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac

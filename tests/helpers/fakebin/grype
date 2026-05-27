@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="${IW_FAKE_GRYPE_MODE:-clean}"
+image=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)
+            echo "grype config=$2" >> "${IW_FAKE_LOG:-/dev/null}"
+            shift 2 ;;
+        registry:*)
+            image="$1"; shift ;;
+        -*)
+            if [[ "${2:-}" != "" && "$2" != -* ]]; then
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        *)
+            image="$1"; shift ;;
+    esac
+done
+
+echo "grype image=${image} mode=${mode} skip_tls=${GRYPE_REGISTRY_INSECURE_SKIP_TLS_VERIFY:-} http=${GRYPE_REGISTRY_INSECURE_USE_HTTP:-}" >> "${IW_FAKE_LOG:-/dev/null}"
+
+case "$mode" in
+    clean)
+        printf '{"matches":[]}\n'
+        exit 0
+        ;;
+    blocked)
+        cat <<'JSON'
+{"matches":[{"vulnerability":{"id":"CVE-2099-0002","namespace":"fake","severity":"High","fix":{"versions":["2.0"]}},"artifact":{"name":"pkg","version":"1.0","type":"apk"}}]}
+JSON
+        exit 0
+        ;;
+    invalid)
+        printf '{invalid\n'
+        exit 0
+        ;;
+    error)
+        exit 3
+        ;;
+    *)
+        echo "unknown fake grype mode: $mode" >&2
+        exit 3
+        ;;
+esac

@@ -1,0 +1,590 @@
+#!/usr/bin/env bash
+# iw-release: Monitor quarantine timers and promote staged images to production
+#
+# Usage:
+#   iw-release
+#   iw-release --force-release <name> [--ignore-scanner]
+#   iw-release --notify-only
+#   iw-release --dry-run
+#
+# Options:
+#   -c, --config PATH           Use an alternate config file.
+#       --secrets PATH          Use an alternate notification secrets file.
+#   -d, --dry-run                Show what would happen without scanning,
+#                                promoting, or modifying any state.
+#   -f, --force-release <name>   Promote immediately, skipping quarantine time.
+#                                Scanner gate still runs unless --ignore-scanner
+#                                is set.
+#       --ignore-scanner         Skip all scanner gates. Only valid with
+#                                --force-release.
+#                                Use only when findings have been manually
+#                                reviewed!
+#   -n, --notify-only            After scanner gates pass, send a notification
+#                                instead of promoting to the configured
+#                                production tag.
+#                                Repeat runs are suppressed until a new digest is
+#                                staged.
+#                                Can also be set permanently via NOTIFY_ONLY=true
+#                                in image-warden.conf.
+#                                --force-release always promotes regardless of
+#                                this flag.
+#   -h, --help                   Show this help. D'uh.
+
+set -euo pipefail
+
+# --- Paths ----------------------------------------------------------------
+_IW_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/image-warden"
+_IW_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/image-warden"
+_IW_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}/image-warden"
+_IW_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}/image-warden"
+
+CONF="${_IW_CONFIG_HOME}/image-warden.conf"
+SECRETS="${_IW_CONFIG_HOME}/secrets"
+COMMON_LIB="${_IW_DATA_HOME}/lib/common.sh"
+CONFIG_LIB="${_IW_DATA_HOME}/lib/config.sh"
+CANDIDATE_LIB="${_IW_DATA_HOME}/lib/candidate.sh"
+SCANNER_LIB="${_IW_DATA_HOME}/lib/scanner.sh"
+NOTIFY_LIB="${_IW_DATA_HOME}/lib/notify.sh"
+
+# --- Argument parsing --------------------------------------------------------
+FORCE_RELEASE=""
+IGNORE_SCANNER=0
+IGNORE_TRIVY_ALIAS=0
+DRY_RUN=false
+_NOTIFY_ONLY_FORCED=0
+SECRETS_EXPLICIT=false
+
+usage() {
+    awk '/^[^#]/{exit} NR>1{sub(/^# ?/,""); print}' "$0"
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force-release|-f)
+            [[ -z "${2:-}" ]] && { echo "ERROR: --force-release requires an image name" >&2; exit 1; }
+            FORCE_RELEASE="$2"; shift 2 ;;
+        --config|-c)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --config requires a path" >&2; exit 1; }
+            CONF="$2"; shift 2 ;;
+        --config=*)
+            CONF="${1#*=}"; shift ;;
+        --secrets)
+            [[ -n "${2:-}" ]] || { echo "ERROR: --secrets requires a path" >&2; exit 1; }
+            SECRETS="$2"; SECRETS_EXPLICIT=true; shift 2 ;;
+        --secrets=*)
+            SECRETS="${1#*=}"; SECRETS_EXPLICIT=true; shift ;;
+        --ignore-scanner)
+            IGNORE_SCANNER=1; shift ;;
+        --ignore-trivy)
+            IGNORE_SCANNER=1; IGNORE_TRIVY_ALIAS=1; shift ;;
+        --dry-run|-d)
+            DRY_RUN=true; shift ;;
+        --notify-only|-n)
+            _NOTIFY_ONLY_FORCED=1; shift ;;
+        --help|-h)
+            usage ;;
+        *)
+            echo "ERROR: unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [[ $IGNORE_SCANNER -eq 1 && -z "$FORCE_RELEASE" ]]; then
+    if [[ $IGNORE_TRIVY_ALIAS -eq 1 ]]; then
+        echo "ERROR: --ignore-trivy is only valid together with --force-release" >&2
+    else
+        echo "ERROR: --ignore-scanner is only valid together with --force-release" >&2
+    fi
+    exit 1
+fi
+
+if [[ $IGNORE_TRIVY_ALIAS -eq 1 ]]; then
+    echo "WARNING: --ignore-trivy is deprecated; use --ignore-scanner" >&2
+fi
+
+# -- Bootstrap -------------------------------------------------------------
+# shellcheck source=/dev/null
+source "$COMMON_LIB"
+# shellcheck disable=SC2034 # Read by _iw_event_log from common.sh.
+IW_EVENT_SOURCE="iw-release"
+
+_iw_acquire_lock "${_IW_STATE_HOME}/lock" || exit 1
+
+if [[ -f "$CONF" && -r "$CONF" ]]; then
+    :
+elif [[ -e "$CONF" ]]; then
+    echo "ERROR: config exists but is not a readable regular file: $CONF" >&2
+    exit 1
+else
+    echo "ERROR: config not found: $CONF" >&2
+    echo "  Copy config/image-warden.conf.example to $CONF and edit it." >&2
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_LIB"
+# shellcheck source=/dev/null
+source "$CANDIDATE_LIB"
+# shellcheck source=/dev/null
+source "$SCANNER_LIB"
+_iw_load_config "$CONF" || exit 1
+
+if [[ -f "$SECRETS" && -r "$SECRETS" ]]; then
+    # shellcheck source=/dev/null
+    source "$SECRETS"
+elif [[ -e "$SECRETS" ]]; then
+    echo "ERROR: secrets exists but is not a readable regular file: $SECRETS" >&2
+    exit 1
+elif $SECRETS_EXPLICIT; then
+    echo "ERROR: secrets not found: $SECRETS" >&2
+    exit 1
+fi
+
+if [[ -f "$NOTIFY_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$NOTIFY_LIB"
+else
+    notify_released() { :; }
+    notify_blocked()  { :; }
+    notify_ready()    { :; }
+    notify_quarantine_accelerated() { :; }
+fi
+
+# Resolve NOTIFY_ONLY: config may set it true; CLI flag always wins.
+if _iw_bool_enabled "${NOTIFY_ONLY:-false}"; then
+    NOTIFY_ONLY=1
+else
+    NOTIFY_ONLY=0
+fi
+[[ $_NOTIFY_ONLY_FORCED -eq 1 ]] && NOTIFY_ONLY=1
+
+if _iw_bool_enabled "${ALLOW_RELEASE_WITHOUT_SCANNER:-false}"; then
+    ALLOW_RELEASE_WITHOUT_SCANNER=1
+else
+    ALLOW_RELEASE_WITHOUT_SCANNER=0
+fi
+
+STATE_DIR="${_IW_STATE_HOME}"
+TRIVY_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
+SCANNER_REPORT_DIR="$TRIVY_REPORT_DIR"
+mkdir -p "$STATE_DIR" "$SCANNER_REPORT_DIR"
+
+NOW=$(date '+%s')
+
+# -- Helpers ------------------------------------------------------------------
+_format_epoch() {
+    local epoch="$1"
+    date -d "@${epoch}" '+%Y-%m-%d %H:%M' 2>/dev/null \
+        || date -r "$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null \
+        || echo "$epoch"
+}
+
+_run_image_release_hook() {
+    local name="$1" from_tag="$2" to_tag="$3" digest="$4"
+
+    [[ -n "${IMAGE_RELEASE_HOOK:-}" ]] || return 0
+
+    local timeout_cmd=()
+    if command -v timeout &>/dev/null; then
+        timeout_cmd=(timeout "${IMAGE_RELEASE_HOOK_TIMEOUT:-120}")
+    fi
+
+    local rc=0
+    log "  Image-release hook: ${IMAGE_RELEASE_HOOK}"
+    IW_IMAGE_NAME="$name" \
+    IW_RELEASE_FROM_TAG="$from_tag" \
+    IW_RELEASE_TO_TAG="$to_tag" \
+    IW_RELEASE_DIGEST="$digest" \
+    IW_LOCAL_REGISTRY="$LOCAL_REGISTRY" \
+    "${timeout_cmd[@]}" "$IMAGE_RELEASE_HOOK" || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        _iw_event_log "image_release_hook_succeeded" \
+            --arg image "$name" \
+            --arg from_tag "$from_tag" \
+            --arg to_tag "$to_tag" \
+            --arg digest "$digest" \
+            --arg hook "$IMAGE_RELEASE_HOOK"
+        return 0
+    fi
+
+    log "  WARNING: image-release hook failed for ${name}:${to_tag} (exit ${rc})"
+    _iw_event_log "image_release_hook_failed" \
+        --arg image "$name" \
+        --arg from_tag "$from_tag" \
+        --arg to_tag "$to_tag" \
+        --arg digest "$digest" \
+        --arg hook "$IMAGE_RELEASE_HOOK" \
+        --arg exit_code "$rc"
+}
+
+# --- Main --------------------------------------------------------------------
+if [[ ${#_IW_IMAGES[@]} -eq 0 ]]; then
+    log "No images configured in $CONF."
+    exit 0
+fi
+
+released=0
+blocked=0
+skipped=0
+pending=0
+
+for local_name in "${_IW_IMAGES[@]}"; do
+    entry_severity="${_IW_CFG["$local_name.severity"]:-}"
+    entry_notify_only="${_IW_CFG["$local_name.notify_only"]:-false}"
+    entry_scanner_ignore="${_IW_CFG["$local_name.scanner_ignore"]:-}"
+    entry_scanner_ignore_reason="${_IW_CFG["$local_name.scanner_ignore_reason"]:-}"
+    entry_trivy_ignore="${_IW_CFG["$local_name.trivy_ignore"]:-}"
+    entry_trivy_ignore_reason="${_IW_CFG["$local_name.trivy_ignore_reason"]:-}"
+    entry_grype_ignore="${_IW_CFG["$local_name.grype_ignore"]:-}"
+    entry_grype_ignore_reason="${_IW_CFG["$local_name.grype_ignore_reason"]:-}"
+    entry_quarantine_hours="${_IW_CFG["$local_name.quarantine_hours"]:-${QUARANTINE_HOURS:-72}}"
+    entry_quarantine_seconds=$(( entry_quarantine_hours * 3600 ))
+    entry_production_tag="${_IW_CFG["$local_name.production_tag"]:-${PRODUCTION_TAG:-production}}"
+    entry_scanners="${_IW_CFG["$local_name.scanners"]:-}"
+    _iw_scanner_init "$entry_scanners"
+
+    if [[ -n "$FORCE_RELEASE" && "$local_name" != "$FORCE_RELEASE" ]]; then
+        continue
+    fi
+
+    # Load candidate queue (newest-first)
+    _iw_candidate_list "$local_name"
+
+    if [[ ${#_CAND_LIST[@]} -eq 0 ]]; then
+        continue
+    fi
+
+    _eligible_preview_count=0
+    for _cand_entry in "${_CAND_LIST[@]}"; do
+        _cand_file="${_cand_entry#*|}"
+        if _iw_candidate_read "$_cand_file"; then
+            _preview_age=$(( NOW - _CAND_STAGED_AT ))
+            if [[ $_preview_age -ge $entry_quarantine_seconds ]]; then
+                _eligible_preview_count=$(( _eligible_preview_count + 1 ))
+            fi
+        fi
+    done
+    log "${local_name}: ${#_CAND_LIST[@]} candidate(s) queued, ${_eligible_preview_count} eligible"
+
+    # Get current production digest for skip-check
+    prod_digest=$(skopeo inspect \
+        "$(_local_tls_flag)" \
+        --format '{{.Digest}}' \
+        "docker://${LOCAL_REGISTRY}/${local_name}:${entry_production_tag}" 2>/dev/null \
+        || echo "none")
+
+    # Iterate candidates newest-first; first eligible+passing wins
+    _image_done=false
+    _eligible_count=0
+    _scanner_blocked_count=0
+    _oldest_blocked_at=0
+    for _cand_entry in "${_CAND_LIST[@]}"; do
+        $_image_done && break
+
+        _cand_file="${_cand_entry#*|}"
+
+        if ! _iw_candidate_read "$_cand_file"; then
+            log "${local_name}: WARNING: corrupt candidate state, removing: $_cand_file"
+            rm -f "$_cand_file"
+            _iw_event_log "candidate_corrupt_removed" \
+                --arg image "$local_name" \
+                --arg file "$_cand_file"
+            continue
+        fi
+
+        staged_tag="$_CAND_TAG"
+        # shellcheck disable=SC2153
+        staged_at="$_CAND_STAGED_AT"
+        cand_digest="$_CAND_DIGEST"
+        quarantine_hours_at_stage="${_CAND_QUARANTINE_HOURS_AT_STAGE:-}"
+        quarantine_acceleration_notified="${_CAND_QUARANTINE_ACCELERATION_NOTIFIED:-false}"
+        age=$(( NOW - staged_at ))
+
+        if [[ -n "$quarantine_hours_at_stage" \
+            && "$quarantine_hours_at_stage" -ne "$entry_quarantine_hours" ]]; then
+            if [[ "$entry_quarantine_hours" -lt "$quarantine_hours_at_stage" ]]; then
+                log "${local_name}: ${staged_tag} quarantine policy changed: staged with ${quarantine_hours_at_stage}h, current ${entry_quarantine_hours}h; timer accelerated"
+                if [[ -z "$FORCE_RELEASE" && "$quarantine_acceleration_notified" != "true" ]]; then
+                    notify_quarantine_accelerated \
+                        "$local_name" \
+                        "$staged_tag" \
+                        "$cand_digest" \
+                        "$quarantine_hours_at_stage" \
+                        "$entry_quarantine_hours" \
+                        "$(( age / 3600 ))"
+                    _iw_candidate_mark_quarantine_acceleration_notified "$local_name" "$cand_digest" || \
+                        log "${local_name}: WARNING: could not mark quarantine acceleration notification for ${staged_tag}"
+                    _iw_event_log "quarantine_accelerated_notified" \
+                        --arg image "$local_name" \
+                        --arg tag "$staged_tag" \
+                        --arg digest "$cand_digest" \
+                        --arg staged_hours "$quarantine_hours_at_stage" \
+                        --arg current_hours "$entry_quarantine_hours" \
+                        --arg age_hours "$(( age / 3600 ))"
+                fi
+            else
+                log "${local_name}: ${staged_tag} quarantine policy changed: staged with ${quarantine_hours_at_stage}h, current ${entry_quarantine_hours}h; timer delayed"
+            fi
+        fi
+
+        # Quarantine check (bypassed by --force-release)
+        if [[ -n "$FORCE_RELEASE" ]]; then
+            log "${local_name}: manual release requested, quarantine bypassed"
+            _iw_event_log "force_release_requested" \
+                --arg image "$local_name" \
+                --arg tag "$staged_tag" \
+                --arg digest "$cand_digest"
+        elif [[ $age -lt $entry_quarantine_seconds ]]; then
+            remaining_sec=$(( entry_quarantine_seconds - age ))
+            if [[ $remaining_sec -ge 3600 ]]; then
+                log "${local_name}: ${staged_tag} - $(( remaining_sec / 3600 ))h remaining in quarantine"
+            else
+                log "${local_name}: ${staged_tag} - $(( remaining_sec / 60 ))m remaining in quarantine"
+            fi
+            continue
+        fi
+        _eligible_count=$(( _eligible_count + 1 ))
+        log "${local_name}: ${staged_tag} - eligible, scanning"
+
+        # Verify staged image still in registry
+        staged_digest=$(_iw_retry "inspect ${LOCAL_REGISTRY}/${local_name}:${staged_tag}" \
+            skopeo inspect \
+            "$(_local_tls_flag)" \
+            --format '{{.Digest}}' \
+            "docker://${LOCAL_REGISTRY}/${local_name}:${staged_tag}" 2>/dev/null) || {
+            log "  WARNING: ${local_name}:${staged_tag} no longer in registry, removing candidate"
+            _iw_candidate_remove "$local_name" "$cand_digest"
+            _iw_event_log "candidate_removed" \
+                --arg image "$local_name" \
+                --arg tag "$staged_tag" \
+                --arg digest "$cand_digest" \
+                --arg reason "missing_from_registry"
+            # Clear digest file so iw-stage can re-stage if upstream unchanged
+            if [[ -f "${STATE_DIR}/${local_name}.digest" \
+                && "$(cat "${STATE_DIR}/${local_name}.digest")" == "$cand_digest" ]]; then
+                rm -f "${STATE_DIR}/${local_name}.digest"
+            fi
+            continue
+        }
+
+        # Skip if production tag already points at this digest
+        if [[ "$staged_digest" == "$prod_digest" ]]; then
+            log "  ${staged_tag}: already at :${entry_production_tag}, removing candidate"
+            _iw_candidate_remove "$local_name" "$cand_digest"
+            _iw_event_log "candidate_removed" \
+                --arg image "$local_name" \
+                --arg tag "$staged_tag" \
+                --arg digest "$cand_digest" \
+                --arg reason "already_released"
+            skipped=$(( skipped + 1 ))
+            _image_done=true
+            continue
+        fi
+
+        # --- Dry-run shortcut ---
+        if $DRY_RUN; then
+            log "  [dry-run] Would scan and promote ${local_name}:${staged_tag} to :${entry_production_tag}"
+            released=$(( released + 1 ))
+            _image_done=true
+            continue
+        fi
+
+        # --- Scanner gate ---
+        if [[ $IGNORE_SCANNER -eq 1 && "$local_name" == "$FORCE_RELEASE" ]]; then
+            log "  WARNING: scanner gate skipped (--ignore-scanner)"
+            _iw_event_log "scanner_gate_ignored" \
+                --arg image "$local_name" \
+                --arg tag "$staged_tag" \
+                --arg digest "$cand_digest"
+        else
+            _candidate_blocked=false
+            for scanner_engine in "${_IW_SCANNER_ENGINES[@]}"; do
+                scan_result=0
+                scanner_label="$(_iw_scanner_label "$scanner_engine")"
+                scanner_ignore=""
+                scanner_ignore_reason=""
+
+                case "$scanner_engine" in
+                    trivy)
+                        scanner_ignore="${entry_trivy_ignore:-$entry_scanner_ignore}"
+                        scanner_ignore_reason="${entry_trivy_ignore_reason:-$entry_scanner_ignore_reason}"
+                        ;;
+                    grype)
+                        scanner_ignore="${entry_grype_ignore:-$entry_scanner_ignore}"
+                        scanner_ignore_reason="${entry_grype_ignore_reason:-$entry_scanner_ignore_reason}"
+                        ;;
+                esac
+
+                _iw_scanner_scan \
+                    "$scanner_engine" \
+                    "${LOCAL_REGISTRY}/${local_name}:${staged_tag}" \
+                    "$local_name" \
+                    "${entry_severity:-}" \
+                    "$scanner_ignore" \
+                    "$scanner_ignore_reason" \
+                    "$staged_tag" || scan_result=$?
+
+                if [[ $scan_result -eq 1 ]]; then
+                    log "  BLOCKED: ${local_name}:${staged_tag} failed ${scanner_label} gate"
+                    _iw_event_log "scan_blocked" \
+                        --arg image "$local_name" \
+                        --arg tag "$staged_tag" \
+                        --arg digest "$cand_digest" \
+                        --arg scanner "$scanner_engine" \
+                        --arg scanner_label "$scanner_label" \
+                        --arg finding_count "$IW_SCANNER_FINDING_COUNT" \
+                        --arg severity "${entry_severity:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}" \
+                        --arg report "$IW_SCANNER_REPORT_FILE"
+                    previous_blocked_report_hash=""
+                    if ! previous_blocked_report_hash=$(_iw_candidate_get_scanner_report_hash "$_cand_file" "$scanner_engine"); then
+                        previous_blocked_report_hash=""
+                    fi
+
+                    current_blocked_report_hash=""
+                    if current_blocked_report_hash=$(_iw_scanner_report_hash "$scanner_engine" "$IW_SCANNER_REPORT_FILE"); then
+                        if [[ "$current_blocked_report_hash" == "$previous_blocked_report_hash" ]]; then
+                            log "  Block notification already sent for unchanged ${scanner_label} report"
+                        else
+                            notify_blocked "$local_name" "$staged_tag" "$IW_SCANNER_FINDING_COUNT" \
+                                "${entry_severity:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}" \
+                                "$IW_SCANNER_REPORT_FILE" \
+                                "$entry_production_tag" \
+                                "$scanner_label"
+                            if ! _iw_candidate_set_scanner_report_hash \
+                                "$local_name" \
+                                "$cand_digest" \
+                                "$scanner_engine" \
+                                "$current_blocked_report_hash"; then
+                                log "${local_name}: WARNING: could not mark blocked ${scanner_label} notification for ${staged_tag}"
+                            fi
+                        fi
+                    else
+                        log "  WARNING: could not fingerprint ${scanner_label} report; sending block notification"
+                        notify_blocked "$local_name" "$staged_tag" "$IW_SCANNER_FINDING_COUNT" \
+                            "${entry_severity:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}" \
+                            "$IW_SCANNER_REPORT_FILE" \
+                            "$entry_production_tag" \
+                            "$scanner_label"
+                    fi
+                    _candidate_blocked=true
+                elif [[ $scan_result -eq 2 && $ALLOW_RELEASE_WITHOUT_SCANNER -ne 1 ]]; then
+                    log "  BLOCKED: ${scanner_label} scanner unavailable and ALLOW_RELEASE_WITHOUT_SCANNER not set"
+                    _iw_event_log "scanner_unavailable" \
+                        --arg image "$local_name" \
+                        --arg tag "$staged_tag" \
+                        --arg digest "$cand_digest" \
+                        --arg scanner "$scanner_engine" \
+                        --arg scanner_label "$scanner_label"
+                    _image_done=true
+                    _candidate_blocked=true
+                    break
+                elif [[ $scan_result -ne 0 && $scan_result -ne 2 ]]; then
+                    log "  BLOCKED: ${scanner_label} scan failed (exit code $scan_result), refusing to promote"
+                    _iw_event_log "scan_error" \
+                        --arg image "$local_name" \
+                        --arg tag "$staged_tag" \
+                        --arg digest "$cand_digest" \
+                        --arg scanner "$scanner_engine" \
+                        --arg scanner_label "$scanner_label" \
+                        --arg exit_code "$scan_result"
+                    _image_done=true
+                    _candidate_blocked=true
+                    break
+                elif [[ $scan_result -eq 0 ]]; then
+                    _iw_event_log "scan_clean" \
+                        --arg image "$local_name" \
+                        --arg tag "$staged_tag" \
+                        --arg digest "$cand_digest" \
+                        --arg scanner "$scanner_engine" \
+                        --arg scanner_label "$scanner_label" \
+                        --arg severity "${entry_severity:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}"
+                fi
+            done
+
+            if $_candidate_blocked; then
+                blocked=$(( blocked + 1 ))
+                _scanner_blocked_count=$(( _scanner_blocked_count + 1 ))
+                if [[ $_oldest_blocked_at -eq 0 || $staged_at -lt $_oldest_blocked_at ]]; then
+                    _oldest_blocked_at="$staged_at"
+                fi
+                continue
+            fi
+        fi
+
+        # --- Notify-only gate ---
+        _image_notify_only=$NOTIFY_ONLY
+        _iw_bool_enabled "$entry_notify_only" && _image_notify_only=1
+
+        if [[ $_image_notify_only -eq 1 && -z "$FORCE_RELEASE" ]]; then
+            notify_pending_file="${STATE_DIR}/${local_name}.notify_pending"
+            if [[ -f "$notify_pending_file" && "$(cat "$notify_pending_file")" == "$staged_digest" ]]; then
+                log "  Notify-only: already notified for ${staged_tag}, awaiting force-release"
+            else
+                log "  Notify-only: ${staged_tag} passed gate, notifying"
+                notify_ready "$local_name" "$staged_tag" "$staged_digest" "scanner"
+                echo "$staged_digest" > "$notify_pending_file"
+                _iw_event_log "notify_ready" \
+                    --arg image "$local_name" \
+                    --arg tag "$staged_tag" \
+                    --arg digest "$staged_digest"
+                pending=$(( pending + 1 ))
+            fi
+            _image_done=true
+            continue
+        fi
+
+        # --- Promote to configured production tag ---
+        _iw_retry "promote ${local_name}:${staged_tag} to :${entry_production_tag}" \
+            skopeo copy \
+            "$(_src_tls_flag)" \
+            "$(_dest_tls_flag)" \
+            --quiet \
+            "docker://${LOCAL_REGISTRY}/${local_name}:${staged_tag}" \
+            "docker://${LOCAL_REGISTRY}/${local_name}:${entry_production_tag}" || {
+            log "  ERROR: promotion failed for ${staged_tag}"
+            continue
+        }
+
+        log "  Released: ${local_name}:${entry_production_tag} (from :${staged_tag}) to ${staged_digest}"
+        notify_released "$local_name" "$staged_tag" "$staged_digest" "$entry_production_tag"
+        _iw_event_log "released" \
+            --arg image "$local_name" \
+            --arg from_tag "$staged_tag" \
+            --arg to_tag "$entry_production_tag" \
+            --arg digest "$staged_digest"
+
+        _run_image_release_hook "$local_name" "$staged_tag" "$entry_production_tag" "$staged_digest"
+
+        # Remove promoted candidate + all older superseded ones
+        _iw_candidate_remove "$local_name" "$cand_digest"
+        _iw_candidate_remove_older "$local_name" "$staged_at"
+        rm -f "${STATE_DIR}/${local_name}.notify_pending"
+
+        released=$(( released + 1 ))
+        _image_done=true
+    done
+
+    if [[ $_image_done == false && $_scanner_blocked_count -gt 0 ]]; then
+        oldest_blocked=$(_format_epoch "$_oldest_blocked_at")
+        log "WARNING: ${local_name}: ${#_CAND_LIST[@]} candidate(s) queued, ${_scanner_blocked_count}/${_eligible_count} eligible candidate(s) blocked by scanner gate (oldest eligible since ${oldest_blocked})"
+        log "WARNING: ${local_name}: review findings, then run 'iw-release --force-release ${local_name} --ignore-scanner' only if acceptable"
+        log "WARNING: ${local_name}: to persistently accept findings, configure scanner_ignore for this image, or scanner-specific trivy_ignore/grype_ignore overrides"
+    fi
+
+done
+
+# --- Summary ------------------------------------------------------------------
+if [[ -n "$FORCE_RELEASE" && $released -eq 0 && $blocked -eq 0 && $skipped -eq 0 ]]; then
+    echo "ERROR: image '${FORCE_RELEASE}' not found or no staged image present." >&2
+    exit 1
+fi
+
+[[ $blocked  -gt 0 ]] && \
+    log "WARNING: ${blocked} image(s) blocked by scanner gate, see reports in ${SCANNER_REPORT_DIR}/"
+[[ $pending  -gt 0 ]] && \
+    log "${pending} image(s) ready, run 'iw-release --force-release <name>' to promote."
+[[ $released -gt 0 ]] && \
+    log "${released} image(s) released."
+
+log "Release run complete."

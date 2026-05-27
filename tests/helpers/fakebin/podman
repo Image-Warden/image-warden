@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo "podman $*" >> "${IW_FAKE_LOG:-/dev/null}"
+exit 0

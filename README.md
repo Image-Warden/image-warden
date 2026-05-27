@@ -191,8 +191,8 @@ SCANNER_GRYPE=false
 SCANNER_SEVERITY="CRITICAL,HIGH"
 
 # Tracked images
-image "nginx" \
-  upstream="ghcr.io/advplyr/nginx:latest"
+image "postgres" \
+  upstream="docker.io/library/postgres:16"
 
 image "nginx" \
   upstream="docker.io/library/nginx:stable" \

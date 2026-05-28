@@ -67,7 +67,7 @@ run_iw iw-scan --config "$conf" --scanner trivy app
 assert_eq "1" "$IW_LAST_STATUS" "blocked scan exits 1"
 assert_contains "$IW_LAST_OUTPUT" "Scan complete: 1 scanner gate(s) blocked."
 
-rm -f "${XDG_CACHE_HOME}/image-warden/trivy-reports/"*.json
+rm -f "${XDG_CACHE_HOME}/image-warden/scanner-reports/"*.json
 export IW_FAKE_TRIVY_MODE=error
 run_iw iw-scan --config "$conf" --scanner trivy app
 assert_eq "2" "$IW_LAST_STATUS" "scanner error exits 2"

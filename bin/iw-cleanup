@@ -105,7 +105,8 @@ else
 fi
 
 STATE_DIR="${_IW_STATE_HOME}"
-TRIVY_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
+SCANNER_REPORT_DIR="${_IW_CACHE_HOME}/scanner-reports"
+LEGACY_TRIVY_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
 mkdir -p "$STATE_DIR"
 
 # -- Helpers -------------------------------------------------------------------
@@ -281,8 +282,9 @@ else
 fi
 
 # -- prune old scanner reports ------------------------------------------------
-if [[ -d "$TRIVY_REPORT_DIR" ]]; then
-    old_count=0
+old_count=0
+for report_dir in "$SCANNER_REPORT_DIR" "$LEGACY_TRIVY_REPORT_DIR"; do
+    [[ -d "$report_dir" ]] || continue
     while IFS= read -r -d '' report; do
         if $DRY_RUN; then
             log "[dry-run] Would remove scanner report: $report"
@@ -293,10 +295,10 @@ if [[ -d "$TRIVY_REPORT_DIR" ]]; then
                 --arg report "$report" \
                 --arg reason "older_than_30_days"
         fi
-    done < <(find "$TRIVY_REPORT_DIR" -name "*.json" -mtime +30 -print0)
+    done < <(find "$report_dir" -name "*.json" -mtime +30 -print0)
+done
 
-    [[ $old_count -gt 0 ]] && log "${old_count} scanner report(s) older than 30 days removed"
-fi
+[[ $old_count -gt 0 ]] && log "${old_count} scanner report(s) older than 30 days removed"
 
 if ! $DRY_RUN; then
     [[ ${cleaned:-0} -gt 0 ]] && notify_cleanup "$cleaned" "${deleted_tags[@]}"

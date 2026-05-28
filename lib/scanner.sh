@@ -167,7 +167,7 @@ _iw_grype_scan() {
     local report_file
     report_file="${report_dir}/${name}_${staged_tag}_grype_$(date '+%Y%m%d_%H%M%S').json"
 
-    log "  Grype scan: checking severity ${severity} ..."
+    log "  Grype scan: checking severity >= ${severity} ..."
 
     local config_file=""
     local -a config_args=()

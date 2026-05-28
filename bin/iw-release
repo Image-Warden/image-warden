@@ -165,8 +165,7 @@ else
 fi
 
 STATE_DIR="${_IW_STATE_HOME}"
-TRIVY_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
-SCANNER_REPORT_DIR="$TRIVY_REPORT_DIR"
+SCANNER_REPORT_DIR="${_IW_CACHE_HOME}/scanner-reports"
 mkdir -p "$STATE_DIR" "$SCANNER_REPORT_DIR"
 
 NOW=$(date '+%s')

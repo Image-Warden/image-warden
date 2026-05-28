@@ -95,7 +95,7 @@ source "$CONFIG_LIB"
 source "$SCANNER_LIB"
 _iw_load_config "$CONF" || exit 1
 
-SCANNER_REPORT_DIR="${_IW_CACHE_HOME}/trivy-reports"
+SCANNER_REPORT_DIR="${_IW_CACHE_HOME}/scanner-reports"
 STATE_DIR="${_IW_STATE_HOME}"
 mkdir -p "$STATE_DIR"
 mkdir -p "$SCANNER_REPORT_DIR"

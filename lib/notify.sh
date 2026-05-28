@@ -320,16 +320,17 @@ ${list}"
     _notify_dispatch "error" "cleanup" "Cleanup needs attention" "$body"
 }
 
-# notify_blocked name staged_tag vuln_count severity report_file production_tag scanner_label
+# notify_blocked name staged_tag finding_count severity report_file production_tag scanner_label
 notify_blocked() {
     local name="$1" staged_tag="$2" count="$3" severity="$4" report="$5" production_tag="${6:-production}"
     local scanner_label="${7:-scanner}"
 
     local body
     body="Tag: ${name}:${staged_tag}
-Vulnerabilities: ${count} (severity >= ${severity})
+Scanner gate: blocked
+Blocking scanner: ${scanner_label}
+Findings in this report: ${count} (severity >= ${severity})
 Report: ${report}
-Scanner: ${scanner_label}
 
 Image will NOT be promoted to :${production_tag}."
 

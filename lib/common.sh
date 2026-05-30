@@ -9,7 +9,7 @@ _iw_event_category() {
     case "$1" in
         staged) echo "stage" ;;
         released|force_release_requested) echo "release" ;;
-        scan_clean|scan_blocked|scan_error|scanner_unavailable) echo "scan" ;;
+        scan_clean|scan_blocked|scan_error|scan_report_changed|scanner_unavailable) echo "scan" ;;
         scanner_gate_ignored) echo "security" ;;
         notify_ready|quarantine_accelerated_notified) echo "notify" ;;
         candidate_removed|candidate_corrupt_removed) echo "state" ;;

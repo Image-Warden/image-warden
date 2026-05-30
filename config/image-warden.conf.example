@@ -141,6 +141,10 @@ SCANNER_TRIVY=true
 SCANNER_GRYPE=false
 SCANNER_SEVERITY="CRITICAL,HIGH"
 
+# Notify again when a blocked scanner report changes for the same candidate.
+# The change is always logged; set false to suppress repeat notifications.
+NOTIFY_ON_BLOCKED_REPORT_CHANGE=true
+
 # -----------------------------------------------------------------------------
 # Allow promotion without a security scanner
 #

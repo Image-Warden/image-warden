@@ -214,7 +214,7 @@ _iw_validate_config() {
         fi
     fi
 
-    for bool_key in LOCAL_REGISTRY_TLS_VERIFY ALLOW_RELEASE_WITHOUT_SCANNER NOTIFY_ONLY SCANNER_TRIVY SCANNER_GRYPE; do
+    for bool_key in LOCAL_REGISTRY_TLS_VERIFY ALLOW_RELEASE_WITHOUT_SCANNER NOTIFY_ONLY NOTIFY_ON_BLOCKED_REPORT_CHANGE SCANNER_TRIVY SCANNER_GRYPE; do
         bool_value="${!bool_key:-}"
         if ! _iw_validate_bool "$bool_key" "$bool_value"; then
             errors=$(( errors + 1 ))

@@ -96,6 +96,16 @@ assert_contains "$IW_LAST_OUTPUT" "ALLOW_RELEASE_WITHOUT_SCANNER must be true or
 
 write_config "$conf" <<'EOF'
 LOCAL_REGISTRY="127.0.0.1:5000"
+NOTIFY_ON_BLOCKED_REPORT_CHANGE=maybe
+image "app" upstream="docker.io/library/nginx:stable"
+EOF
+
+run_iw iw-config check --config "$conf"
+assert_failure "$IW_LAST_STATUS" "invalid blocked report change notification bool should fail"
+assert_contains "$IW_LAST_OUTPUT" "NOTIFY_ON_BLOCKED_REPORT_CHANGE must be true or false"
+
+write_config "$conf" <<'EOF'
+LOCAL_REGISTRY="127.0.0.1:5000"
 SCANNER_TRIVY=false
 SCANNER_GRYPE=false
 image "app" upstream="docker.io/library/nginx:stable"

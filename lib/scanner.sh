@@ -83,6 +83,72 @@ _iw_scanner_report_hash() {
     esac
 }
 
+_iw_scanner_report_summary() {
+    local engine="${1:-${IW_SCANNER_ENGINE:-${_IW_SCANNER_ENGINES[0]:-}}}"
+    [[ $# -gt 0 ]] && shift
+
+    case "$engine" in
+        trivy) _iw_trivy_report_summary "$@" ;;
+        grype) _iw_grype_report_summary "$@" ;;
+        *)     return 1 ;;
+    esac
+}
+
+_iw_scanner_report_summary_delta() {
+    local old_summary="$1" new_summary="$2"
+
+    jq -rn --argjson old "$old_summary" --argjson new "$new_summary" '
+      def n($v): ($v // 0);
+      def ids($v): (($v.ids // []) | map(select(type == "string" and length > 0)) | unique | sort);
+      def diff($a; $b): [ids($a)[] as $id | select((ids($b) | index($id)) | not) | $id];
+      def norm($v): {
+        finding_count: n($v.finding_count),
+        critical: n($v.critical),
+        high: n($v.high),
+        medium: n($v.medium),
+        low: n($v.low),
+        unknown: n($v.unknown),
+        ids: ids($v)
+      };
+
+      (diff($new; $old)) as $added
+      | (diff($old; $new)) as $removed
+      | {
+          summary_changed: (norm($old) != norm($new)),
+          old_finding_count: (n($old.finding_count) | tostring),
+          new_finding_count: (n($new.finding_count) | tostring),
+          old_critical: (n($old.critical) | tostring),
+          new_critical: (n($new.critical) | tostring),
+          old_high: (n($old.high) | tostring),
+          new_high: (n($new.high) | tostring),
+          new_ids: ($added | join(",")),
+          resolved_ids: ($removed | join(","))
+        }
+    '
+}
+
+_iw_scanner_report_summary_diff() {
+    local old_summary="$1" new_summary="$2"
+
+    _iw_scanner_report_summary_delta "$old_summary" "$new_summary" | jq -r '
+      "findings \(.old_finding_count) -> \(.new_finding_count), " +
+      "critical \(.old_critical) -> \(.new_critical), " +
+      "high \(.old_high) -> \(.new_high)",
+      (if (.new_ids // "") != "" then
+         "new finding id(s): " + .new_ids
+       else empty end),
+      (if (.resolved_ids // "") != "" then
+         "resolved finding id(s): " + .resolved_ids
+       else empty end)
+    '
+}
+
+_iw_scanner_report_summary_changed() {
+    local old_summary="$1" new_summary="$2"
+
+    _iw_scanner_report_summary_delta "$old_summary" "$new_summary" | jq -e '.summary_changed == true' >/dev/null
+}
+
 _iw_jq_severity_filter() {
     local severity="$1"
     jq -R 'split(",") | map(ascii_upcase)' <<< "$severity"
@@ -114,6 +180,32 @@ _iw_trivy_report_hash() {
     printf 'sha256:%s\n' "$hash"
 }
 
+_iw_trivy_report_summary() {
+    local report="$1"
+    local severity="${2:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}"
+    local severity_json
+
+    severity_json=$(_iw_jq_severity_filter "$severity") || return 1
+
+    jq -c --argjson sevs "$severity_json" '
+      [
+        .Results[]?
+        | .Vulnerabilities[]?
+        | select(.Severity as $sev | $sevs | index($sev))
+        | {id: .VulnerabilityID, severity: .Severity}
+      ] as $items
+      | {
+          finding_count: ($items | length),
+          critical: ($items | map(select(.severity == "CRITICAL")) | length),
+          high: ($items | map(select(.severity == "HIGH")) | length),
+          medium: ($items | map(select(.severity == "MEDIUM")) | length),
+          low: ($items | map(select(.severity == "LOW")) | length),
+          unknown: ($items | map(select(.severity == "UNKNOWN")) | length),
+          ids: ($items | map(.id | select(type == "string" and length > 0)) | unique | sort)
+        }
+    ' "$report"
+}
+
 _iw_grype_report_hash() {
     local report="$1"
     local normalized hash
@@ -137,6 +229,31 @@ _iw_grype_report_hash() {
 
     [[ "$hash" =~ ^[0-9a-f]{64}$ ]] || return 1
     printf 'sha256:%s\n' "$hash"
+}
+
+_iw_grype_report_summary() {
+    local report="$1"
+    local severity="${2:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}"
+    local severity_json
+
+    severity_json=$(_iw_jq_severity_filter "$severity") || return 1
+
+    jq -c --argjson sevs "$severity_json" '
+      [
+        .matches[]?
+        | select((.vulnerability.severity | ascii_upcase) as $sev | $sevs | index($sev))
+        | {id: .vulnerability.id, severity: (.vulnerability.severity | ascii_upcase)}
+      ] as $items
+      | {
+          finding_count: ($items | length),
+          critical: ($items | map(select(.severity == "CRITICAL")) | length),
+          high: ($items | map(select(.severity == "HIGH")) | length),
+          medium: ($items | map(select(.severity == "MEDIUM")) | length),
+          low: ($items | map(select(.severity == "LOW")) | length),
+          unknown: ($items | map(select(.severity == "UNKNOWN")) | length),
+          ids: ($items | map(.id | select(type == "string" and length > 0)) | unique | sort)
+        }
+    ' "$report"
 }
 
 _iw_grype_scan() {

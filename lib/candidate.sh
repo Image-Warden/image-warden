@@ -93,6 +93,14 @@ _iw_candidate_get_scanner_report_hash() {
     printf '%s\n' "$hash"
 }
 
+_iw_candidate_get_scanner_report_summary() {
+    local candidate_file="$1" scanner="$2"
+
+    jq -c --arg scanner "$scanner" '
+        .scanner_blocked_report_summaries[$scanner] // empty
+    ' "$candidate_file"
+}
+
 _iw_candidate_set_scanner_report_hash() {
     local name="$1" digest="$2" scanner="$3" value="$4"
     local file tmp
@@ -117,6 +125,26 @@ _iw_candidate_set_scanner_report_hash() {
 
     rm -f "$tmp"
     return 1
+}
+
+_iw_candidate_set_scanner_report_state() {
+    local name="$1" digest="$2" scanner="$3" hash="$4" summary="$5"
+    local file tmp
+
+    file="$(_iw_candidate_file "$name" "$digest")"
+    [[ -f "$file" ]] || return 1
+
+    tmp="${file}.tmp.$$"
+    jq \
+        --arg scanner "$scanner" \
+        --arg hash "$hash" \
+        --argjson summary "$summary" \
+        '.scanner_blocked_report_hashes = (.scanner_blocked_report_hashes // {})
+         | .scanner_blocked_report_hashes[$scanner] = $hash
+         | .scanner_blocked_report_summaries = (.scanner_blocked_report_summaries // {})
+         | .scanner_blocked_report_summaries[$scanner] = $summary
+         | del(.trivy_blocked_report_hash)' \
+        "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
 _iw_candidate_read() {

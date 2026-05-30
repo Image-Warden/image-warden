@@ -226,6 +226,16 @@ printf '%s\n' "$filtered_json" | jq -r '
     elif .event == "scan_blocked" then
       "blocked :" + (.tag // "?") + " by " + (.scanner_label // .scanner // "scanner") +
       " findings=" + (.finding_count // "?")
+    elif .event == "scan_report_changed" then
+      if (.summary_changed // "true") == "false" then
+        (.scanner_label // .scanner // "scanner") + " report hash changed :" + (.tag // "?") +
+        ", blocking summary unchanged"
+      else
+        (.scanner_label // .scanner // "scanner") + " report changed :" + (.tag // "?") +
+        " findings " + (.old_finding_count // "?") + " -> " + (.new_finding_count // "?") +
+        ", critical " + (.old_critical // "?") + " -> " + (.new_critical // "?") +
+        ", high " + (.old_high // "?") + " -> " + (.new_high // "?")
+      end
     elif .event == "scan_clean" then
       "scan clean :" + (.tag // "?") + " by " + (.scanner_label // .scanner // "scanner")
     elif .event == "scan_error" then

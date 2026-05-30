@@ -190,6 +190,9 @@ SCANNER_TRIVY=true
 SCANNER_GRYPE=false
 SCANNER_SEVERITY="CRITICAL,HIGH"
 
+# Notify again when a blocked scanner report changes
+NOTIFY_ON_BLOCKED_REPORT_CHANGE=true
+
 # Tracked images
 image "postgres" \
   upstream="docker.io/library/postgres:16"
@@ -213,6 +216,8 @@ image "alpine" \
 `SCANNER_TRIVY` and `SCANNER_GRYPE` enable scanner backends. All enabled scanners must pass. Grype scans currently use `--only-fixed`.
 
 `SCANNER_SEVERITY` controls the global scanner severity threshold. Existing `TRIVY_SEVERITY` settings are still accepted as a compatibility fallback.
+
+`NOTIFY_ON_BLOCKED_REPORT_CHANGE` controls repeat notifications for blocked candidates. The default is `true`: Image-Warden sends a new notification when the scanner report for the same candidate changes. Report changes are always logged.
 
 `scanners` is optional and scoped to that image only. If set, it overrides the global scanner toggles for that image. Use comma-separated names with no spaces, for example `scanners="trivy,grype"`.
 

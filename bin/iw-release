@@ -440,22 +440,99 @@ for local_name in "${_IW_IMAGES[@]}"; do
                         previous_blocked_report_hash=""
                     fi
 
+                    previous_blocked_report_summary=""
+                    if ! previous_blocked_report_summary=$(_iw_candidate_get_scanner_report_summary "$_cand_file" "$scanner_engine"); then
+                        previous_blocked_report_summary=""
+                    fi
+
                     current_blocked_report_hash=""
-                    if current_blocked_report_hash=$(_iw_scanner_report_hash "$scanner_engine" "$IW_SCANNER_REPORT_FILE"); then
+                    current_blocked_report_summary=""
+                    if current_blocked_report_hash=$(_iw_scanner_report_hash "$scanner_engine" "$IW_SCANNER_REPORT_FILE") \
+                        && current_blocked_report_summary=$(_iw_scanner_report_summary "$scanner_engine" "$IW_SCANNER_REPORT_FILE" "${entry_severity:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}"); then
                         if [[ "$current_blocked_report_hash" == "$previous_blocked_report_hash" ]]; then
                             log "  Block notification already sent for unchanged ${scanner_label} report"
+                            if [[ -z "$previous_blocked_report_summary" ]]; then
+                                _iw_candidate_set_scanner_report_state \
+                                    "$local_name" \
+                                    "$cand_digest" \
+                                    "$scanner_engine" \
+                                    "$current_blocked_report_hash" \
+                                    "$current_blocked_report_summary" || true
+                            fi
                         else
-                            notify_blocked "$local_name" "$staged_tag" "$IW_SCANNER_FINDING_COUNT" \
-                                "${entry_severity:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}" \
-                                "$IW_SCANNER_REPORT_FILE" \
-                                "$entry_production_tag" \
-                                "$scanner_label"
-                            if ! _iw_candidate_set_scanner_report_hash \
+                            blocked_summary_changed="unknown"
+                            report_change_note=""
+                            if [[ -n "$previous_blocked_report_summary" ]]; then
+                                report_delta=$(_iw_scanner_report_summary_delta "$previous_blocked_report_summary" "$current_blocked_report_summary")
+                                blocked_summary_changed=$(jq -r '.summary_changed | tostring' <<< "$report_delta")
+                                old_finding_count=$(jq -r '.old_finding_count' <<< "$report_delta")
+                                new_finding_count=$(jq -r '.new_finding_count' <<< "$report_delta")
+                                old_critical=$(jq -r '.old_critical' <<< "$report_delta")
+                                new_critical=$(jq -r '.new_critical' <<< "$report_delta")
+                                old_high=$(jq -r '.old_high' <<< "$report_delta")
+                                new_high=$(jq -r '.new_high' <<< "$report_delta")
+                                new_ids=$(jq -r '.new_ids' <<< "$report_delta")
+                                resolved_ids=$(jq -r '.resolved_ids' <<< "$report_delta")
+
+                                while IFS= read -r report_diff_line; do
+                                    [[ -n "$report_diff_line" ]] && log "  ${scanner_label} report changed: ${report_diff_line}"
+                                done < <(_iw_scanner_report_summary_diff "$previous_blocked_report_summary" "$current_blocked_report_summary")
+
+                                _iw_event_log "scan_report_changed" \
+                                    --arg image "$local_name" \
+                                    --arg tag "$staged_tag" \
+                                    --arg digest "$cand_digest" \
+                                    --arg scanner "$scanner_engine" \
+                                    --arg scanner_label "$scanner_label" \
+                                    --arg old_hash "$previous_blocked_report_hash" \
+                                    --arg new_hash "$current_blocked_report_hash" \
+                                    --arg old_finding_count "$old_finding_count" \
+                                    --arg new_finding_count "$new_finding_count" \
+                                    --arg old_critical "$old_critical" \
+                                    --arg new_critical "$new_critical" \
+                                    --arg old_high "$old_high" \
+                                    --arg new_high "$new_high" \
+                                    --arg new_ids "$new_ids" \
+                                    --arg resolved_ids "$resolved_ids" \
+                                    --arg summary_changed "$blocked_summary_changed"
+
+                                if [[ "$blocked_summary_changed" == "false" ]]; then
+                                    log "  ${scanner_label} report hash changed, blocking summary unchanged"
+                                else
+                                    report_change_note="Reason: ${scanner_label} blocking report changed since last blocked scan
+Findings: ${old_finding_count} -> ${new_finding_count}
+Critical: ${old_critical} -> ${new_critical}
+High: ${old_high} -> ${new_high}"
+                                    [[ -n "$new_ids" ]] && report_change_note="${report_change_note}
+New IDs: ${new_ids}"
+                                    [[ -n "$resolved_ids" ]] && report_change_note="${report_change_note}
+Resolved IDs: ${resolved_ids}"
+                                fi
+                            fi
+
+                            if [[ -z "$previous_blocked_report_hash" ]] \
+                                || [[ "$blocked_summary_changed" == "unknown" ]] \
+                                || { [[ "$blocked_summary_changed" == "true" ]] \
+                                    && ! _iw_bool_disabled "${NOTIFY_ON_BLOCKED_REPORT_CHANGE:-true}"; }; then
+                                notify_blocked "$local_name" "$staged_tag" "$IW_SCANNER_FINDING_COUNT" \
+                                    "${entry_severity:-${SCANNER_SEVERITY:-${TRIVY_SEVERITY:-CRITICAL,HIGH}}}" \
+                                    "$IW_SCANNER_REPORT_FILE" \
+                                    "$entry_production_tag" \
+                                    "$scanner_label" \
+                                    "$report_change_note"
+                            elif [[ "$blocked_summary_changed" == "false" ]]; then
+                                log "  Block notification suppressed for unchanged ${scanner_label} blocking summary"
+                            else
+                                log "  Block notification suppressed for changed ${scanner_label} report"
+                            fi
+
+                            if ! _iw_candidate_set_scanner_report_state \
                                 "$local_name" \
                                 "$cand_digest" \
                                 "$scanner_engine" \
-                                "$current_blocked_report_hash"; then
-                                log "${local_name}: WARNING: could not mark blocked ${scanner_label} notification for ${staged_tag}"
+                                "$current_blocked_report_hash" \
+                                "$current_blocked_report_summary"; then
+                                log "${local_name}: WARNING: could not store blocked ${scanner_label} report state for ${staged_tag}"
                             fi
                         fi
                     else

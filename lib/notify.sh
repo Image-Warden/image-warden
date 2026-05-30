@@ -22,7 +22,7 @@
 # Public functions (called by bin scripts):
 #   notify_staged   name upstream local_tag digest quarantine_hours
 #   notify_released name staged_tag digest production_tag
-#   notify_blocked  name staged_tag vuln_count severity report_file production_tag scanner_label
+#   notify_blocked  name staged_tag vuln_count severity report_file production_tag scanner_label [report_change_note]
 #   notify_ready    name staged_tag digest scanner_label
 #   notify_vuln     name vuln_id score description
 #   notify_cleanup  count deleted_tags...
@@ -320,10 +320,11 @@ ${list}"
     _notify_dispatch "error" "cleanup" "Cleanup needs attention" "$body"
 }
 
-# notify_blocked name staged_tag finding_count severity report_file production_tag scanner_label
+# notify_blocked name staged_tag finding_count severity report_file production_tag scanner_label [report_change_note]
 notify_blocked() {
     local name="$1" staged_tag="$2" count="$3" severity="$4" report="$5" production_tag="${6:-production}"
     local scanner_label="${7:-scanner}"
+    local report_change_note="${8:-}"
 
     local body
     body="Tag: ${name}:${staged_tag}
@@ -333,6 +334,12 @@ Findings in this report: ${count} (severity >= ${severity})
 Report: ${report}
 
 Image will NOT be promoted to :${production_tag}."
+
+    if [[ -n "$report_change_note" ]]; then
+        body="${body}
+
+${report_change_note}"
+    fi
 
     _notify_dispatch "error" "blocked" "Blocked: ${name}:${staged_tag}" "$body"
 }

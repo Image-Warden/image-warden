@@ -344,6 +344,20 @@ ${report_change_note}"
     _notify_dispatch "error" "blocked" "Blocked: ${name}:${staged_tag}" "$body"
 }
 
+# notify_digest_mismatch name staged_tag expected_digest found_digest
+notify_digest_mismatch() {
+    local name="$1" staged_tag="$2" expected_digest="$3" found_digest="$4"
+
+    local body
+    body="Tag: ${name}:${staged_tag}
+Expected digest: ${expected_digest}
+Registry digest: ${found_digest}
+
+The staged registry tag no longer matches the candidate state. The candidate was removed and will not be released."
+
+    _notify_dispatch "error" "digest_mismatch" "Staged digest changed: ${name}:${staged_tag}" "$body"
+}
+
 # notify_vuln name vuln_id score description
 notify_vuln() {
     local name="$1" vuln_id="$2" score="$3" description="$4"

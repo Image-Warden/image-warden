@@ -148,6 +148,7 @@ else
     notify_blocked()  { :; }
     notify_ready()    { :; }
     notify_quarantine_accelerated() { :; }
+    notify_digest_mismatch() { :; }
 fi
 
 # Resolve NOTIFY_ONLY: config may set it true; CLI flag always wins.
@@ -352,20 +353,54 @@ for local_name in "${_IW_IMAGES[@]}"; do
             "$(_local_tls_flag)" \
             --format '{{.Digest}}' \
             "docker://${LOCAL_REGISTRY}/${local_name}:${staged_tag}" 2>/dev/null) || {
-            log "  WARNING: ${local_name}:${staged_tag} no longer in registry, removing candidate"
-            _iw_candidate_remove "$local_name" "$cand_digest"
-            _iw_event_log "candidate_removed" \
-                --arg image "$local_name" \
-                --arg tag "$staged_tag" \
-                --arg digest "$cand_digest" \
-                --arg reason "missing_from_registry"
-            # Clear digest file so iw-stage can re-stage if upstream unchanged
-            if [[ -f "${STATE_DIR}/${local_name}.digest" \
-                && "$(cat "${STATE_DIR}/${local_name}.digest")" == "$cand_digest" ]]; then
-                rm -f "${STATE_DIR}/${local_name}.digest"
+            if $DRY_RUN; then
+                log "  [dry-run] ${local_name}:${staged_tag} no longer in registry; would remove candidate"
+                skipped=$(( skipped + 1 ))
+                [[ "$local_name" == "$FORCE_RELEASE" ]] && _image_done=true
+            else
+                log "  WARNING: ${local_name}:${staged_tag} no longer in registry, removing candidate"
+                _iw_candidate_remove "$local_name" "$cand_digest"
+                _iw_event_log "candidate_removed" \
+                    --arg image "$local_name" \
+                    --arg tag "$staged_tag" \
+                    --arg digest "$cand_digest" \
+                    --arg reason "missing_from_registry"
+                # Clear digest file so iw-stage can re-stage if upstream unchanged
+                if [[ -f "${STATE_DIR}/${local_name}.digest" \
+                    && "$(cat "${STATE_DIR}/${local_name}.digest")" == "$cand_digest" ]]; then
+                    rm -f "${STATE_DIR}/${local_name}.digest"
+                fi
             fi
             continue
         }
+
+        if [[ "$staged_digest" != "$cand_digest" ]]; then
+            if $DRY_RUN; then
+                log "  [dry-run] ${local_name}:${staged_tag} digest changed in registry; would remove candidate"
+                skipped=$(( skipped + 1 ))
+                [[ "$local_name" == "$FORCE_RELEASE" ]] && _image_done=true
+            else
+                log "  WARNING: ${local_name}:${staged_tag} digest changed in registry, removing candidate"
+            fi
+            log "  Expected: ${cand_digest}"
+            log "  Found:    ${staged_digest}"
+            if ! $DRY_RUN; then
+                notify_digest_mismatch "$local_name" "$staged_tag" "$cand_digest" "$staged_digest"
+                _iw_candidate_remove "$local_name" "$cand_digest"
+                _iw_event_log "candidate_removed" \
+                    --arg image "$local_name" \
+                    --arg tag "$staged_tag" \
+                    --arg digest "$cand_digest" \
+                    --arg staged_digest "$staged_digest" \
+                    --arg reason "digest_mismatch"
+                # Clear digest file so iw-stage can re-stage if upstream unchanged.
+                if [[ -f "${STATE_DIR}/${local_name}.digest" \
+                    && "$(cat "${STATE_DIR}/${local_name}.digest")" == "$cand_digest" ]]; then
+                    rm -f "${STATE_DIR}/${local_name}.digest"
+                fi
+            fi
+            continue
+        fi
 
         # Skip if production tag already points at this digest
         if [[ "$staged_digest" == "$prod_digest" ]]; then

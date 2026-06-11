@@ -73,6 +73,28 @@ assert_contains "$IW_LAST_OUTPUT" "app: 1 candidate(s) queued, 0 eligible"
 assert_contains "$IW_LAST_OUTPUT" "remaining in quarantine"
 assert_not_contains "$IW_LAST_OUTPUT" "Released:"
 
+mismatch_digest="sha256:2222222222222222222222222222222222222222222222222222222222222222"
+export IW_FAKE_STAGED_DIGEST="$mismatch_digest"
+run_iw iw-release --config "$conf" --dry-run --force-release app
+assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
+assert_contains "$IW_LAST_OUTPUT" "[dry-run] app:${tag} digest changed in registry; would remove candidate"
+assert_file_exists "$candidate"
+assert_file_exists "${XDG_STATE_HOME}/image-warden/app.digest"
+
+run_iw iw-release --config "$conf" --force-release app
+assert_failure "$IW_LAST_STATUS" "digest mismatch force-release should not succeed"
+assert_contains "$IW_LAST_OUTPUT" "digest changed in registry, removing candidate"
+assert_contains "$IW_LAST_OUTPUT" "Expected: ${digest}"
+assert_contains "$IW_LAST_OUTPUT" "Found:    ${mismatch_digest}"
+assert_file_not_exists "$candidate"
+assert_file_not_exists "${XDG_STATE_HOME}/image-warden/app.digest"
+
+unset IW_FAKE_STAGED_DIGEST
+run_iw iw-stage --config "$conf" app
+assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
+assert_contains "$IW_LAST_OUTPUT" "Staged as :${tag}"
+assert_file_exists "$candidate"
+
 export IW_FAKE_TRIVY_MODE=blocked
 run_iw iw-release --config "$conf" --force-release app
 assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
@@ -102,6 +124,7 @@ assert_file_contains "$hook_log" "registry=127.0.0.1:5000" "hook registry"
 events="${XDG_STATE_HOME}/image-warden/events.log"
 assert_file_exists "$events"
 assert_file_contains "$events" '"event":"staged"' "staged event"
+assert_file_contains "$events" '"reason":"digest_mismatch"' "digest mismatch event"
 assert_file_contains "$events" '"event":"scan_blocked"' "blocked event"
 assert_file_contains "$events" '"event":"scanner_gate_ignored"' "ignore scanner event"
 assert_file_contains "$events" '"event":"released"' "released event"

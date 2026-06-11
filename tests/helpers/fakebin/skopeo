@@ -4,6 +4,7 @@ set -euo pipefail
 echo "skopeo $*" >> "${IW_FAKE_LOG:-/dev/null}"
 
 digest="${IW_FAKE_UPSTREAM_DIGEST:-sha256:1111111111111111111111111111111111111111111111111111111111111111}"
+staged_digest="${IW_FAKE_STAGED_DIGEST:-$digest}"
 prod_digest="${IW_FAKE_PROD_DIGEST:-sha256:9999999999999999999999999999999999999999999999999999999999999999}"
 created="${IW_FAKE_UPSTREAM_CREATED:-2099-01-02T03:04:05Z}"
 
@@ -39,6 +40,8 @@ JSON
         result_digest="$digest"
         if [[ "$ref" == docker://127.0.0.1:5000/* && "$ref" != *_20* ]]; then
             result_digest="$prod_digest"
+        elif [[ "$ref" == docker://127.0.0.1:5000/*_20* ]]; then
+            result_digest="$staged_digest"
         fi
 
         case "$format" in

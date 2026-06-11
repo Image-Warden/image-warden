@@ -63,6 +63,18 @@ assert_json_field "$candidate" ".quarantine_hours_at_stage" "72" "candidate quar
 assert_file_contains "$IW_FAKE_LOG" "--override-os=linux --override-arch=arm --override-variant=v7" "platform flags passed to skopeo"
 assert_file_contains "$IW_FAKE_LOG" "docker://127.0.0.1:5000/app:${tag}" "staged copy destination"
 
+rm -f "${XDG_STATE_HOME}/image-warden/app.digest"
+run_iw iw-stage --config "$conf" --dry-run app
+assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
+assert_contains "$IW_LAST_OUTPUT" "Candidate already queued for this digest, skipping"
+assert_contains "$IW_LAST_OUTPUT" "[dry-run] Would update digest cache for queued candidate"
+assert_file_not_exists "${XDG_STATE_HOME}/image-warden/app.digest"
+
+run_iw iw-stage --config "$conf" app
+assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
+assert_contains "$IW_LAST_OUTPUT" "Candidate already queued for this digest, skipping"
+assert_file_contains "${XDG_STATE_HOME}/image-warden/app.digest" "$digest" "digest cache restored for queued candidate"
+
 run_iw iw-stage --config "$conf" app
 assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
 assert_contains "$IW_LAST_OUTPUT" "No change (${digest})"

@@ -18,6 +18,10 @@
 #       --secrets PATH  Use an alternate notification secrets file.
 #   -d, --dry-run       Check for new digests without copying.
 #   -h, --help          Show this help.
+#
+# Exit status:
+#   0  Completed without staging infrastructure failures.
+#   1  One or more inspect, copy or candidate-state writes failed.
 
 set -euo pipefail
 
@@ -172,6 +176,7 @@ fi
 
 # -- poor man's multithreading: get upstream digests and dates ----------------
 declare -A _inspect_pid _inspect_tmp _inspect_err _inspect_platform_os _inspect_platform_arch _inspect_platform_variant
+stage_failed=0
 
 log "Checking ${#_IW_IMAGES[@]} image(s) for updates..."
 for local_name in "${_IW_IMAGES[@]}"; do
@@ -222,6 +227,7 @@ for local_name in "${_IW_IMAGES[@]}"; do
         err_msg=$(tr -d '\n' < "$err" 2>/dev/null)
         rm -f "$err"
         log "  WARNING: could not inspect ${upstream}, skipping${err_msg:+: $err_msg}"
+        stage_failed=$(( stage_failed + 1 ))
         continue
     fi
     rm -f "$err"
@@ -262,7 +268,11 @@ for local_name in "${_IW_IMAGES[@]}"; do
     # Skip if candidate already queued for this digest
     if _iw_candidate_exists "$local_name" "$upstream_digest"; then
         log "  Candidate already queued for this digest, skipping"
-        echo "$upstream_digest" > "$digest_file"
+        if $DRY_RUN; then
+            log "  [dry-run] Would update digest cache for queued candidate"
+        else
+            echo "$upstream_digest" > "$digest_file"
+        fi
         continue
     fi
 
@@ -282,20 +292,27 @@ for local_name in "${_IW_IMAGES[@]}"; do
         "docker://${upstream}" \
         "docker://${LOCAL_REGISTRY}/${local_name}:${local_tag}" || {
         log "  ERROR: copy failed, skipping"
+        stage_failed=$(( stage_failed + 1 ))
         continue
     }
 
-    # Keep last-seen digest and queue candidate state.
-    echo "$upstream_digest" > "$digest_file"
+    # Queue candidate state before recording last-seen digest. If candidate
+    # write fails, a later run must be able to retry the same upstream digest.
     staged_epoch=$(date '+%s')
 
-    _iw_candidate_write \
+    if ! _iw_candidate_write \
         "$local_name" \
         "$upstream" \
         "$local_tag" \
         "$upstream_digest" \
         "$staged_epoch" \
-        "$entry_quarantine_hours"
+        "$entry_quarantine_hours"; then
+        log "  ERROR: could not write candidate state, digest cache not updated"
+        stage_failed=$(( stage_failed + 1 ))
+        continue
+    fi
+
+    echo "$upstream_digest" > "$digest_file"
 
     release_eta=$(date -d "+${entry_quarantine_hours} hours" '+%Y-%m-%d %H:%M' 2>/dev/null \
         || date -v "+${entry_quarantine_hours}H" '+%Y-%m-%d %H:%M' 2>/dev/null \
@@ -311,5 +328,10 @@ for local_name in "${_IW_IMAGES[@]}"; do
 
     notify_staged "$local_name" "$upstream" "$local_tag" "$upstream_digest" "$entry_quarantine_hours"
 done
+
+if [[ $stage_failed -gt 0 ]]; then
+    log "Stage run complete with ${stage_failed} failure(s)."
+    exit 1
+fi
 
 log "Stage run complete."

@@ -24,8 +24,14 @@ _iw_event_log() {
     local event="$1"
     shift
 
-    [[ -n "${STATE_DIR:-}" ]] || return 0
-    mkdir -p "$STATE_DIR" || return 0
+    if [[ -z "${STATE_DIR:-}" ]]; then
+        echo "WARNING: event log skipped: STATE_DIR is not set" >&2
+        return 0
+    fi
+    if ! mkdir -p "$STATE_DIR"; then
+        echo "WARNING: event log skipped: cannot create state directory: $STATE_DIR" >&2
+        return 0
+    fi
 
     local events_file="${IW_EVENTS_LOG:-${STATE_DIR}/events.log}"
     local ts
@@ -34,14 +40,19 @@ _iw_event_log() {
     local category
     category="$(_iw_event_category "$event")"
 
-    if command -v jq &>/dev/null; then
-        jq -cn \
-            --arg ts "$ts" \
-            --arg event "$event" \
-            --arg source "$source" \
-            --arg category "$category" \
-            "$@" \
-            '$ARGS.named' >> "$events_file" 2>/dev/null || return 0
+    if ! command -v jq &>/dev/null; then
+        echo "WARNING: event log skipped: jq not found" >&2
+        return 0
+    fi
+
+    if ! jq -cn \
+        --arg ts "$ts" \
+        --arg event "$event" \
+        --arg source "$source" \
+        --arg category "$category" \
+        "$@" \
+        '$ARGS.named' >> "$events_file" 2>/dev/null; then
+        echo "WARNING: event log write failed: $events_file" >&2
     fi
 }
 

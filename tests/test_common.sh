@@ -43,3 +43,13 @@ assert_eq "" "$(_iw_platform_flags "" "" "")" "empty platform flags"
 run_func _iw_parse_platform "linux/sparc" "platform"
 assert_failure "$IW_LAST_STATUS" "unknown arch should fail"
 assert_contains "$IW_LAST_OUTPUT" "unrecognized arch"
+
+STATE_DIR="${XDG_STATE_HOME}/image-warden"
+export STATE_DIR
+mkdir -p "${IW_TEST_TMP}/event-log-dir"
+IW_EVENTS_LOG="${IW_TEST_TMP}/event-log-dir"
+export IW_EVENTS_LOG
+run_func _iw_event_log "staged" --arg image "app"
+assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
+assert_contains "$IW_LAST_OUTPUT" "WARNING: event log write failed"
+unset IW_EVENTS_LOG

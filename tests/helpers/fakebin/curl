@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 echo "curl $*" >> "${IW_FAKE_LOG:-/dev/null}"
+if [[ "${IW_FAKE_CURL_FAIL:-0}" == "1" ]]; then
+    echo "curl failed" >&2
+    exit 22
+fi
 printf '{}\n'

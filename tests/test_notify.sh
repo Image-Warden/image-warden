@@ -8,6 +8,14 @@ iw_test_init
 
 source "${IW_TEST_ROOT}/lib/notify.sh"
 
+NOTIFY_BACKENDS=(discord)
+DISCORD_WEBHOOK_URL="https://example.invalid/webhook"
+export IW_FAKE_CURL_FAIL=1
+run_func _notify_dispatch "error" "blocked" "Blocked" "body"
+assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
+assert_contains "$IW_LAST_OUTPUT" "notify: discord send failed"
+unset IW_FAKE_CURL_FAIL
+
 _notify_dispatch() {
     IW_NOTIFY_COLOR="$1"
     IW_NOTIFY_EVENT="$2"

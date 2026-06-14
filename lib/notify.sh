@@ -85,18 +85,21 @@ _iw_ntfy_tags() {
 # Set IW_NOTIFY_DEBUG=1 to surface HTTP status and error responses.
 _iw_curl() {
     if [[ "${IW_NOTIFY_DEBUG:-0}" == "1" ]]; then
-        local out http_code body
-        out=$(curl -s -w '\n<<<HTTP:%{http_code}>>>' "$@" 2>&1) || true
-        http_code=$(printf '%s' "$out" | grep -o '<<<HTTP:[0-9]*>>>' | grep -o '[0-9]*')
+        local out http_code body rc
+        rc=0
+        out=$(curl -s -w '\n<<<HTTP:%{http_code}>>>' "$@" 2>&1) || rc=$?
+        http_code=$(printf '%s' "$out" | grep -o '<<<HTTP:[0-9]*>>>' | grep -o '[0-9]*' || true)
         body=$(printf '%s' "$out" | sed 's/<<<HTTP:[0-9]*>>>//')
-        if [[ "$http_code" =~ ^2 ]]; then
+        if [[ $rc -eq 0 && "$http_code" =~ ^2 ]]; then
             echo "    HTTP ${http_code} OK" >&2
+            return 0
         else
-            echo "    HTTP ${http_code} FAILED" >&2
+            echo "    HTTP ${http_code:-000} FAILED" >&2
             [[ -n "${body// }" ]] && echo "    Response: ${body}" >&2
+            return 1
         fi
     else
-        curl -sf "$@" >/dev/null 2>&1 || true
+        curl -sf "$@" >/dev/null 2>&1
     fi
 }
 
@@ -211,11 +214,11 @@ _notify_dispatch() {
     for backend in "${NOTIFY_BACKENDS[@]:-}"; do
         [[ "${IW_NOTIFY_DEBUG:-0}" == "1" ]] && echo "  [${backend}]" >&2
         case "$backend" in
-            discord)  _send_discord  "$color_type" "$title" "$body" ;;
-            slack)    _send_slack    "$color_type" "$title" "$body" ;;
-            teams)    _send_teams    "$color_type" "$title" "$body" ;;
-            telegram) _send_telegram "$color_type" "$title" "$body" ;;
-            ntfy)     _send_ntfy    "$color_type" "$title" "$body" "$event_hint" ;;
+            discord)  _send_discord  "$color_type" "$title" "$body" || echo "[image-warden] notify: discord send failed" >&2 ;;
+            slack)    _send_slack    "$color_type" "$title" "$body" || echo "[image-warden] notify: slack send failed" >&2 ;;
+            teams)    _send_teams    "$color_type" "$title" "$body" || echo "[image-warden] notify: teams send failed" >&2 ;;
+            telegram) _send_telegram "$color_type" "$title" "$body" || echo "[image-warden] notify: telegram send failed" >&2 ;;
+            ntfy)     _send_ntfy    "$color_type" "$title" "$body" "$event_hint" || echo "[image-warden] notify: ntfy send failed" >&2 ;;
             "")       ;;  # NOTIFY_BACKENDS unset -> silent
             *)        echo "[image-warden] notify: unknown backend '${backend}'" >&2 ;;
         esac

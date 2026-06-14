@@ -269,16 +269,28 @@ elif ! "$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" true 2>/dev/null; then
     cleanup_failures+=("registry GC skipped: container '${REGISTRY_CONTAINER_NAME}' not running")
     cleanup_failed=$(( cleanup_failed + 1 ))
 else
-    "$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" \
+    gc_output=""
+    gc_rc=0
+    set +e
+    gc_output=$("$_RUNTIME" exec "$REGISTRY_CONTAINER_NAME" \
         /bin/registry garbage-collect \
         /etc/distribution/config.yml \
-        --delete-untagged=false \
-        2>&1 | tail -1 | while IFS= read -r line; do
-            log "  GC: $line"
-        done
-    _iw_event_log "registry_gc" \
-        --arg runtime "$_RUNTIME" \
-        --arg container "$REGISTRY_CONTAINER_NAME"
+        --delete-untagged=false 2>&1)
+    gc_rc=$?
+    set -e
+
+    gc_last_line=$(printf '%s\n' "$gc_output" | tail -1)
+    [[ -n "$gc_last_line" ]] && log "  GC: $gc_last_line"
+
+    if [[ $gc_rc -eq 0 ]]; then
+        _iw_event_log "registry_gc" \
+            --arg runtime "$_RUNTIME" \
+            --arg container "$REGISTRY_CONTAINER_NAME"
+    else
+        log "  WARNING: registry garbage collection failed (exit code ${gc_rc})"
+        cleanup_failures+=("registry GC failed: ${_RUNTIME} exec ${REGISTRY_CONTAINER_NAME} exited ${gc_rc}")
+        cleanup_failed=$(( cleanup_failed + 1 ))
+    fi
 fi
 
 # -- prune old scanner reports ------------------------------------------------

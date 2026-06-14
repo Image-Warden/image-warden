@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 echo "podman $*" >> "${IW_FAKE_LOG:-/dev/null}"
+if [[ "${IW_FAKE_PODMAN_GC_FAIL:-0}" == "1" && "$*" == *"garbage-collect"* ]]; then
+    echo "gc failed"
+    exit 42
+fi
+if [[ "$*" == *"garbage-collect"* ]]; then
+    echo "gc complete"
+fi
 exit 0

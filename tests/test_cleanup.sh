@@ -39,3 +39,18 @@ assert_file_contains "$IW_FAKE_LOG" "curl -sf -X DELETE" "cleanup uses registry 
 assert_file_contains "$IW_FAKE_LOG" "podman exec staging-registry" "cleanup runs registry gc"
 assert_file_contains "$events" '"event":"cleanup_deleted_tag"' "cleanup deletion event"
 assert_file_contains "$events" '"event":"registry_gc"' "registry gc event"
+
+old_report_dir="${XDG_CACHE_HOME}/image-warden/scanner-reports"
+old_report="${old_report_dir}/old.json"
+mkdir -p "$old_report_dir"
+printf '{}\n' > "$old_report"
+touch -d '40 days ago' "$old_report"
+
+export IW_FAKE_PODMAN_GC_FAIL=1
+run_iw iw-cleanup --config "$conf"
+assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
+assert_contains "$IW_LAST_OUTPUT" "GC: gc failed"
+assert_contains "$IW_LAST_OUTPUT" "registry garbage collection failed (exit code 42)"
+assert_contains "$IW_LAST_OUTPUT" "1 scanner report(s) older than 30 days removed"
+assert_file_not_exists "$old_report"
+assert_file_contains "$events" '"event":"scanner_report_removed"' "scanner report pruning continued after gc failure"

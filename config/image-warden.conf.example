@@ -43,6 +43,11 @@ PRODUCTION_TAG="production"
 # IW_RETRY_ATTEMPTS=3
 # IW_RETRY_DELAY_SECONDS=5
 
+# Timeout for acquiring the shared Image-Warden lock.
+# Prevents timer jobs from waiting forever behind a stuck run.
+# Set to 0 for non-blocking lock acquisition.
+# IW_LOCK_TIMEOUT_SECONDS=600
+
 # -----------------------------------------------------------------------------
 # Image-release hook
 #

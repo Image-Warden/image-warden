@@ -174,6 +174,9 @@ PRODUCTION_TAG="production"
 # IW_RETRY_ATTEMPTS=3
 # IW_RETRY_DELAY_SECONDS=5
 
+# Optional shared lock timeout in seconds
+# IW_LOCK_TIMEOUT_SECONDS=600
+
 # Optional executable run once per promoted image
 # IMAGE_RELEASE_HOOK="/home/media/bin/iw-image-release"
 # IMAGE_RELEASE_HOOK_TIMEOUT=120

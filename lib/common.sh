@@ -172,13 +172,19 @@ _local_tls_flag() {
 
 _iw_acquire_lock() {
     local lock_file="$1"
+    local timeout="${IW_LOCK_TIMEOUT_SECONDS:-600}"
     local lock_dir
+
+    if ! [[ "$timeout" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: IW_LOCK_TIMEOUT_SECONDS must be a non-negative integer, got: '$timeout'" >&2
+        return 1
+    fi
 
     lock_dir="$(dirname -- "$lock_file")"
     mkdir -p "$lock_dir"
     exec 9>"$lock_file"
-    flock 9 || {
-        echo "ERROR: cannot acquire lock: $lock_file" >&2
+    flock -w "$timeout" 9 || {
+        echo "ERROR: cannot acquire lock within ${timeout}s: $lock_file" >&2
         return 1
     }
 }

@@ -53,3 +53,16 @@ run_func _iw_event_log "staged" --arg image "app"
 assert_success "$IW_LAST_STATUS" "$IW_LAST_OUTPUT"
 assert_contains "$IW_LAST_OUTPUT" "WARNING: event log write failed"
 unset IW_EVENTS_LOG
+
+lock_file="${IW_TEST_TMP}/locks/test.lock"
+mkdir -p "$(dirname -- "$lock_file")"
+exec 8>"$lock_file"
+flock 8
+IW_LOCK_TIMEOUT_SECONDS=0
+export IW_LOCK_TIMEOUT_SECONDS
+run_func _iw_acquire_lock "$lock_file"
+assert_failure "$IW_LAST_STATUS" "held lock should time out"
+assert_contains "$IW_LAST_OUTPUT" "cannot acquire lock within 0s"
+unset IW_LOCK_TIMEOUT_SECONDS
+flock -u 8
+exec 8>&-

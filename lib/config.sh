@@ -167,6 +167,13 @@ _iw_validate_config() {
         fi
     fi
 
+    if [[ -n "${IW_LOCK_TIMEOUT_SECONDS:-}" ]]; then
+        if ! [[ "$IW_LOCK_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: IW_LOCK_TIMEOUT_SECONDS must be a non-negative integer, got: '$IW_LOCK_TIMEOUT_SECONDS'" >&2
+            errors=$(( errors + 1 ))
+        fi
+    fi
+
     if [[ -n "${IMAGE_RELEASE_HOOK:-}" ]]; then
         if [[ "$IMAGE_RELEASE_HOOK" != /* ]]; then
             echo "ERROR: IMAGE_RELEASE_HOOK must be an absolute path, got: '$IMAGE_RELEASE_HOOK'" >&2

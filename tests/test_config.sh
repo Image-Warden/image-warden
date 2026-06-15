@@ -134,3 +134,13 @@ EOF
 run_iw iw-config check --config "$conf"
 assert_failure "$IW_LAST_STATUS" "invalid hook timeout should fail"
 assert_contains "$IW_LAST_OUTPUT" "IMAGE_RELEASE_HOOK_TIMEOUT must be a positive integer"
+
+write_config "$conf" <<'EOF'
+LOCAL_REGISTRY="127.0.0.1:5000"
+IW_LOCK_TIMEOUT_SECONDS=soon
+image "app" upstream="docker.io/library/nginx:stable"
+EOF
+
+run_iw iw-config check --config "$conf"
+assert_failure "$IW_LAST_STATUS" "invalid lock timeout should fail"
+assert_contains "$IW_LAST_OUTPUT" "IW_LOCK_TIMEOUT_SECONDS must be a non-negative integer"

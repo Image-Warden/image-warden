@@ -305,13 +305,15 @@ for local_name in "${_IW_IMAGES[@]}"; do
 
     log "  Copying to ${LOCAL_REGISTRY}/${local_name}:${local_tag} ..."
 
-    # shellcheck disable=SC2046
+    # Copy by digest, not tag: the upstream tag may move between digest
+    # resolution and copy. The resolved digest is a single-image manifest, so
+    # no platform override flags are needed for the copy itself.
+    upstream_repo=$(_iw_ref_repo "$upstream")
     _iw_retry "copy ${upstream} to ${LOCAL_REGISTRY}/${local_name}:${local_tag}" \
         skopeo copy \
-        $(_iw_platform_flags "$platform_os" "$platform_arch" "$platform_variant") \
         "$(_dest_tls_flag)" \
         --quiet \
-        "docker://${upstream}" \
+        "docker://${upstream_repo}@${upstream_digest}" \
         "docker://${LOCAL_REGISTRY}/${local_name}:${local_tag}" || {
         log "  ERROR: copy failed, skipping"
         stage_failed=$(( stage_failed + 1 ))

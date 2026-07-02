@@ -450,9 +450,11 @@ for local_name in "${_IW_IMAGES[@]}"; do
                         ;;
                 esac
 
+                # Scan by digest so the scanned image is byte-identical to the
+                # one promoted below, even if the staged tag is repointed.
                 _iw_scanner_scan \
                     "$scanner_engine" \
-                    "${LOCAL_REGISTRY}/${local_name}:${staged_tag}" \
+                    "${LOCAL_REGISTRY}/${local_name}@${cand_digest}" \
                     "$local_name" \
                     "${entry_severity:-}" \
                     "$scanner_ignore" \
@@ -646,12 +648,14 @@ Resolved IDs: ${resolved_ids}"
         fi
 
         # --- Promote to configured production tag ---
+        # Promote from the digest, not the staged tag: the digest was verified
+        # and scanned above and cannot be repointed between check and copy.
         _iw_retry "promote ${local_name}:${staged_tag} to :${entry_production_tag}" \
             skopeo copy \
             "$(_src_tls_flag)" \
             "$(_dest_tls_flag)" \
             --quiet \
-            "docker://${LOCAL_REGISTRY}/${local_name}:${staged_tag}" \
+            "docker://${LOCAL_REGISTRY}/${local_name}@${cand_digest}" \
             "docker://${LOCAL_REGISTRY}/${local_name}:${entry_production_tag}" || {
             log "  ERROR: promotion failed for ${staged_tag}"
             continue

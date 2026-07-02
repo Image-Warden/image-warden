@@ -13,7 +13,12 @@ After=network-online.target
 ContainerName=staging-registry
 Image=docker.io/library/registry:3
 AutoUpdate=disabled
-PublishPort=5000:5000
+
+# Bind the host port to localhost by default. Containers in the same podman
+# network can still reach the registry via their network/service name.
+# If other LAN hosts must pull from this registry, expose it deliberately and
+# protect it with firewall rules, auth or a trusted reverse proxy.
+PublishPort=127.0.0.1:5000:5000
 
 # TODO: set volume paths
 # Volume=/path/to/registry/data:/var/lib/registry:Z

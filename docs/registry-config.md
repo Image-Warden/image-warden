@@ -49,3 +49,14 @@ Add to `/etc/docker/daemon.json`:
 ```
 
 For a LAN registry (e.g. `192.168.1.10:5000`), replace `localhost:5000` with the actual address.
+
+The provided Quadlet binds the registry host port to `127.0.0.1` by default.
+That only limits access from outside the host. It does not prevent containers in
+the same compose or podman network from reaching the registry through their
+internal service name, for example `registry:5000`.
+
+If other machines need to pull promoted images, expose the registry deliberately
+and protect it with firewall rules, authentication or a trusted reverse proxy.
+An unauthenticated, write/delete-enabled registry reachable from the LAN allows
+other hosts to overwrite promoted tags such as `:production`, bypassing
+Image-Warden's quarantine gate.

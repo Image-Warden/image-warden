@@ -34,8 +34,13 @@ image() {
         key="${kv%%=*}"
         value="${kv#*=}"
         case "$key" in
-            upstream|severity|notify_only|scanner_ignore|scanner_ignore_reason|trivy_ignore|trivy_ignore_reason|grype_ignore|grype_ignore_reason|quarantine_hours|production_tag|scanners|platform|signature_provider|cosign_key)
+            upstream|severity|notify_only|scanner_ignore|scanner_ignore_reason|trivy_ignore|trivy_ignore_reason|grype_ignore|grype_ignore_reason|quarantine_hours|production_tag|scanners|platform)
                 _IW_CFG["$name.$key"]="$value" ;;
+            signature_provider|cosign_key)
+                echo "ERROR: image option '$key' for '$name' is not implemented yet; remove it from the config" >&2
+                _IW_IMAGE_DSL_ERRORS=$(( _IW_IMAGE_DSL_ERRORS + 1 ))
+                return 1
+                ;;
             *)
                 echo "ERROR: unknown image option '$key' for '$name'" >&2
                 _IW_IMAGE_DSL_ERRORS=$(( _IW_IMAGE_DSL_ERRORS + 1 ))

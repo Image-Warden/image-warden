@@ -43,6 +43,30 @@ assert_contains "$IW_LAST_OUTPUT" "config error(s)"
 write_config "$conf" <<'EOF'
 LOCAL_REGISTRY="127.0.0.1:5000"
 image "app" \
+  upstream="docker.io/library/nginx:stable" \
+  cosign_key="/etc/image-warden/cosign.pub"
+EOF
+
+run_iw iw-config check --config "$conf"
+assert_failure "$IW_LAST_STATUS" "unimplemented security option should fail"
+assert_contains "$IW_LAST_OUTPUT" "image option 'cosign_key' for 'app' is not implemented yet"
+assert_contains "$IW_LAST_OUTPUT" "config error(s)"
+
+write_config "$conf" <<'EOF'
+LOCAL_REGISTRY="127.0.0.1:5000"
+image "app" \
+  upstream="docker.io/library/nginx:stable" \
+  signature_provider="cosign"
+EOF
+
+run_iw iw-config check --config "$conf"
+assert_failure "$IW_LAST_STATUS" "unimplemented signature provider option should fail"
+assert_contains "$IW_LAST_OUTPUT" "image option 'signature_provider' for 'app' is not implemented yet"
+assert_contains "$IW_LAST_OUTPUT" "config error(s)"
+
+write_config "$conf" <<'EOF'
+LOCAL_REGISTRY="127.0.0.1:5000"
+image "app" \
   upstream="docker.io/library/nginx:stable"
   quarantine_hours=60
 EOF

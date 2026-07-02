@@ -31,6 +31,10 @@ JSON
         ;;
     inspect)
         if $raw; then
+            if [[ -n "${IW_FAKE_RAW_MANIFEST:-}" ]]; then
+                printf '%s\n' "$IW_FAKE_RAW_MANIFEST"
+                exit 0
+            fi
             cat <<JSON
 {"manifests":[{"digest":"${digest}","platform":{"os":"linux","architecture":"arm","variant":"v7"}},{"digest":"${digest}","platform":{"os":"linux","architecture":"amd64"}}]}
 JSON

@@ -115,6 +115,19 @@ fi
 STATE_DIR="${_IW_STATE_HOME}"
 mkdir -p "$STATE_DIR"
 
+# -- Host platform fallback ----------------------------------------------------
+# skopeo copy pushes a single-platform image, so digest tracking must record
+# the per-platform manifest digest even when no platform is configured; a
+# manifest-list digest would never match the staged image at release time.
+_IW_HOST_PLAT_OS="" _IW_HOST_PLAT_ARCH="" _IW_HOST_PLAT_VARIANT=""
+if _iw_parse_platform "linux/$(uname -m)" "host platform"; then
+    _IW_HOST_PLAT_OS="$_IW_PLAT_OS"
+    _IW_HOST_PLAT_ARCH="$_IW_PLAT_ARCH"
+    _IW_HOST_PLAT_VARIANT="$_IW_PLAT_VARIANT"
+else
+    log "WARNING: could not determine host platform, staging without platform pin"
+fi
+
 # -- Resolve upstream digest and Created date. --------------------------------
 _inspect_upstream() {
     local upstream="$1"
@@ -175,7 +188,7 @@ if [[ -n "$TARGET_IMAGE" ]]; then
 fi
 
 # -- poor man's multithreading: get upstream digests and dates ----------------
-declare -A _inspect_pid _inspect_tmp _inspect_err _inspect_platform_os _inspect_platform_arch _inspect_platform_variant
+declare -A _inspect_pid _inspect_tmp _inspect_err _inspect_platform_os _inspect_platform_arch _inspect_platform_variant _inspect_platform_source
 stage_failed=0
 
 log "Checking ${#_IW_IMAGES[@]} image(s) for updates..."
@@ -187,8 +200,16 @@ for local_name in "${_IW_IMAGES[@]}"; do
     _inspect_tmp["$local_name"]="$tmp"
     _inspect_err["$local_name"]="$err"
 
-    if ! _iw_parse_platform "$entry_platform" "image '$local_name' platform"; then
-        exit 1
+    if [[ -n "$entry_platform" ]]; then
+        if ! _iw_parse_platform "$entry_platform" "image '$local_name' platform"; then
+            exit 1
+        fi
+        _inspect_platform_source["$local_name"]=""
+    else
+        _IW_PLAT_OS="$_IW_HOST_PLAT_OS"
+        _IW_PLAT_ARCH="$_IW_HOST_PLAT_ARCH"
+        _IW_PLAT_VARIANT="$_IW_HOST_PLAT_VARIANT"
+        _inspect_platform_source["$local_name"]="${_IW_HOST_PLAT_ARCH:+host default}"
     fi
     _inspect_platform_os["$local_name"]="$_IW_PLAT_OS"
     _inspect_platform_arch["$local_name"]="$_IW_PLAT_ARCH"
@@ -211,10 +232,11 @@ for local_name in "${_IW_IMAGES[@]}"; do
     platform_os="${_inspect_platform_os[$local_name]:-}"
     platform_arch="${_inspect_platform_arch[$local_name]:-}"
     platform_variant="${_inspect_platform_variant[$local_name]:-}"
+    platform_source="${_inspect_platform_source[$local_name]:-}"
 
     log "Checking ${local_name}: $upstream"
     if [[ -n "$platform_arch" ]]; then
-        log "  Platform: ${platform_os}/${platform_arch}${platform_variant:+/$platform_variant}"
+        log "  Platform: ${platform_os}/${platform_arch}${platform_variant:+/$platform_variant}${platform_source:+ (${platform_source})}"
     fi
 
     inspect_out=""
@@ -324,7 +346,8 @@ for local_name in "${_IW_IMAGES[@]}"; do
         --arg tag "$local_tag" \
         --arg digest "$upstream_digest" \
         --arg quarantine_hours "$entry_quarantine_hours" \
-        --arg platform "${platform_arch:+${platform_os}/${platform_arch}${platform_variant:+/$platform_variant}}"
+        --arg platform "${platform_arch:+${platform_os}/${platform_arch}${platform_variant:+/$platform_variant}}" \
+        --arg platform_source "${platform_arch:+${platform_source:-config}}"
 
     notify_staged "$local_name" "$upstream" "$local_tag" "$upstream_digest" "$entry_quarantine_hours"
 done

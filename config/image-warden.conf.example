@@ -116,10 +116,12 @@ CONTAINER_RUNTIME="docker"
 REGISTRY_CONTAINER_NAME="staging-registry"
 
 # -----------------------------------------------------------------------------
-# Platform (recommended)
+# Platform
 #
-# Pin the platform so digest tracking is precise: without this, a rebuild of
-# any platform in a multi-arch manifest list triggers a redundant re-stage.
+# Image-Warden stages exactly one platform per image and tracks its
+# per-platform manifest digest. When unset, the staging host's platform is
+# auto-detected (logged as "host default"). Set this only to stage for a
+# different platform than the staging host.
 # Format: os/arch[/variant] (e.g., linux/amd64, linux/arm/v7).
 #
 # Canonical arch (as in "architecture", not as in "I use Arch, btw.") values:
@@ -128,8 +130,8 @@ REGISTRY_CONTAINER_NAME="staging-registry"
 #
 # Common aliases (x86_64, aarch64, armhf, ...) are auto-normalized. I hope.
 #
-# Leave empty or unset to use the host's native platform. Skopeo always
-# copies a single platform; multi-arch copy (--all) is not supported.
+# Skopeo always copies a single platform; multi-arch copy (--all) is not
+# supported.
 # -----------------------------------------------------------------------------
 # PLATFORM="linux/amd64"
 

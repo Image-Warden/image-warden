@@ -108,6 +108,23 @@ _upstream_tag() {
     fi
 }
 
+# Strip tag and digest from a full image reference, keeping registry ports.
+# Shares the tag-detection rule with _upstream_tag: a colon only separates a
+# tag if the part after it contains no slash.
+#   docker.io/library/nginx:stable   ->  docker.io/library/nginx
+#   localhost:5000/myapp:v1.2        ->  localhost:5000/myapp
+#   localhost:5000/myapp@sha256:...  ->  localhost:5000/myapp
+#   nginx                            ->  nginx
+_iw_ref_repo() {
+    local ref="${1%%@*}" part
+    part="${ref##*:}"
+    if [[ "$part" == "$ref" || "$part" == */* ]]; then
+        echo "$ref"
+    else
+        echo "${ref%:*}"
+    fi
+}
+
 _iw_parse_platform() {
     local platform="$1"
     local label="${2:-PLATFORM}"

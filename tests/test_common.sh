@@ -44,6 +44,15 @@ run_func _iw_parse_platform "linux/sparc" "platform"
 assert_failure "$IW_LAST_STATUS" "unknown arch should fail"
 assert_contains "$IW_LAST_OUTPUT" "unrecognized arch"
 
+assert_eq "nginx" "$(_iw_ref_repo "nginx")" "ref_repo bare name"
+assert_eq "nginx" "$(_iw_ref_repo "nginx:stable")" "ref_repo strips tag"
+assert_eq "docker.io/library/nginx" "$(_iw_ref_repo "docker.io/library/nginx:1.29")" "ref_repo strips tag from qualified ref"
+assert_eq "registry:5000/app" "$(_iw_ref_repo "registry:5000/app:tag")" "ref_repo keeps registry port, strips tag"
+assert_eq "registry:5000/app" "$(_iw_ref_repo "registry:5000/app")" "ref_repo keeps registry port without tag"
+assert_eq "repo" "$(_iw_ref_repo "repo@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")" "ref_repo strips digest"
+assert_eq "localhost:5000/app" "$(_iw_ref_repo "localhost:5000/app@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")" "ref_repo keeps port, strips digest"
+assert_eq "repo" "$(_iw_ref_repo "repo:tag@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")" "ref_repo strips tag and digest"
+
 STATE_DIR="${XDG_STATE_HOME}/image-warden"
 export STATE_DIR
 mkdir -p "${IW_TEST_TMP}/event-log-dir"
